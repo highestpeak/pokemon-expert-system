@@ -1,39 +1,22 @@
 from poke_env.battle import AbstractBattle, Pokemon, Move
 from poke_env.player import Player
+from poke_env.battle.move_category import MoveCategory
+from poke_env.battle.side_condition import SideCondition
 from typing import Dict, List, Tuple, Optional, Any, cast
 import random
 import math
 
 team = """
-Ribombee @ Focus Sash
-Ability: Sweet Veil
-Tera Type: Fairy
-EVs: 252 SpA / 4 SpD / 252 Spe
-Timid Nature
-- Sticky Web
-- Stun Spore
-- Quiver Dance
-- Moonblast
-
 Arceus-Fairy @ Pixie Plate
 Ability: Multitype
-Tera Type: Fairy
-EVs: 248 HP / 120 Def / 16 SpA / 124 Spe
-Modest Nature
-- Judgment
-- Earth Power
-- Calm Mind
-- Recover
-
-Koraidon @ Choice Band
-Ability: Orichalcum Pulse
 Tera Type: Fire
-EVs: 252 Atk / 4 Def / 252 Spe
-Jolly Nature
-- Low Kick
-- Dragon Claw
-- U-turn
-- Flare Blitz
+EVs: 248 HP / 72 Def / 188 Spe
+Bold Nature
+IVs: 0 Atk
+- Calm Mind
+- Judgment
+- Taunt
+- Recover
 
 Zacian-Crowned @ Rusted Sword
 Ability: Intrepid Sword
@@ -42,18 +25,19 @@ EVs: 252 Atk / 4 SpD / 252 Spe
 Jolly Nature
 - Swords Dance
 - Behemoth Blade
-- Substitute
-- Play Rough
+- Close Combat
+- Wild Charge
 
-Rayquaza @ Heavy-Duty Boots
-Ability: Air Lock
-Tera Type: Flying
-EVs: 252 Atk / 4 SpD / 252 Spe
-Adamant Nature
-- Dragon Dance
-- Dragon Ascent
-- Extreme Speed
-- Earthquake
+Eternatus @ Power Herb
+Ability: Pressure
+Tera Type: Fire
+EVs: 124 HP / 252 SpA / 132 Spe
+Modest Nature
+IVs: 0 Atk
+- Agility
+- Meteor Beam
+- Dynamax Cannon
+- Fire Blast
 
 Necrozma-Dusk-Mane @ Assault Vest
 Ability: Prism Armor
@@ -65,6 +49,26 @@ Impish Nature
 - Photon Geyser
 - Rock Slide
 
+Deoxys-Speed @ Focus Sash
+Ability: Pressure
+Tera Type: Ghost
+EVs: 248 HP / 8 SpA / 252 Spe
+Timid Nature
+IVs: 0 Atk
+- Thunder Wave
+- Spikes
+- Taunt
+- Psycho Boost
+
+Kingambit @ Dread Plate
+Ability: Supreme Overlord
+Tera Type: Dark
+EVs: 56 HP / 252 Atk / 200 Spe
+Adamant Nature
+- Swords Dance
+- Kowtow Cleave
+- Iron Head
+- Sucker Punch
 """
 
 # 宝可梦属性克制表 (第六世代起)
@@ -174,6 +178,9 @@ PRIORITY_MOVES = {'extremespeed', 'suckerpunch', 'bulletpunch', 'machpunch', 'va
 
 # 回复受队组合招式
 RECOVERY_MOVES = {'recover', 'roost', 'synthesis', 'moonlight', 'rest', 'slackoff'}
+
+# ============================== Simple策略快速决策常量 ==============================
+# 借鉴SimpleHeuristicsPlayer的常量（将在类内部定义）
 
 # ============================== 队伍组合应对 策略配置常量 ==============================
 # 战略目标配置
@@ -377,6 +384,20 @@ def get_active_pokemon(battle: AbstractBattle) -> Tuple[Optional[Pokemon], Optio
     return my_pokemon, opp_pokemon
 
 class CustomAgent(Player):
+    # ============================== Simple策略快速决策常量 ==============================
+    # 借鉴SimpleHeuristicsPlayer的常量
+    ENTRY_HAZARDS = {
+        "spikes": SideCondition.SPIKES,
+        "stealthrock": SideCondition.STEALTH_ROCK,
+        "stickyweb": SideCondition.STICKY_WEB,
+        "toxicspikes": SideCondition.TOXIC_SPIKES,
+    }
+    
+    ANTI_HAZARDS_MOVES = {"rapidspin", "defog"}
+    SPEED_TIER_COEFICIENT = 0.1
+    HP_FRACTION_COEFICIENT = 0.4
+    SWITCH_OUT_MATCHUP_THRESHOLD = -2
+    
     def __init__(self, *args, **kwargs):
         super().__init__(team=team, *args, **kwargs)
         # 初始化学习数据
@@ -424,7 +445,12 @@ class CustomAgent(Player):
         # **异常状态修正**：必须要有，否则 AI 会傻乎乎地让睡着的宝可梦硬抗
         self.adjust_for_status(my_pokemon)
         
-        # 执行完整的策略pipeline
+        # **新增：快速决策路径** - 借鉴Simple策略的简洁逻辑
+        quick_decision = self.quick_decision_path(battle)
+        if quick_decision:
+            return quick_decision
+        
+        # 执行完整的策略pipeline（保持原有复杂逻辑）
         best_action = self.execute_strategy_pipeline(battle)
 
         if best_action:
@@ -482,6 +508,192 @@ class CustomAgent(Player):
                 'avoid_setup': False,
                 'consider_switch': False
             }
+
+    # ============================== 快速决策路径 ==============================
+    def quick_decision_path(self, battle: AbstractBattle) -> Optional[Any]:
+        """快速决策路径 - 借鉴Simple策略的简洁逻辑"""
+        my_pokemon, opp_pokemon = get_active_pokemon(battle)
+        
+        if not my_pokemon or not opp_pokemon:
+            return None
+        
+        # 快速路径1：明显的KO机会
+        if self.has_obvious_ko_opportunity(battle):
+            return self.choose_ko_move(battle)
+        
+        # 快速路径2：明显的换人优势
+        if self.has_obvious_switch_advantage(battle):
+            return self.choose_advantageous_switch(battle)
+        
+        # 快速路径3：场地控制优先级
+        if self.should_prioritize_hazards(battle):
+            return self.choose_hazard_move(battle)
+        
+        # 快速路径4：强化机会
+        if self.has_setup_opportunity(battle):
+            return self.choose_setup_move(battle)
+        
+        return None  # 返回None表示使用复杂策略
+
+    def has_obvious_ko_opportunity(self, battle: AbstractBattle) -> bool:
+        """检查是否有明显的KO机会 - 借鉴Simple的伤害计算"""
+        my_pokemon, opp_pokemon = get_active_pokemon(battle)
+        
+        # 使用Simple的伤害比例计算
+        physical_ratio = self._stat_estimation(my_pokemon, "atk") / self._stat_estimation(opp_pokemon, "def")
+        special_ratio = self._stat_estimation(my_pokemon, "spa") / self._stat_estimation(opp_pokemon, "spd")
+        
+        for move in battle.available_moves:
+            if move.base_power > 0:
+                # 使用Simple的招式评分
+                move_score = (move.base_power * 
+                             (1.5 if move.type in my_pokemon.types else 1) *
+                             (physical_ratio if move.category == MoveCategory.PHYSICAL else special_ratio) *
+                             move.accuracy * 
+                             opp_pokemon.damage_multiplier(move))
+                
+                # 如果评分很高且对手血量较低，认为是KO机会
+                if move_score > 200 and opp_pokemon.current_hp_fraction < 0.3:
+                    return True
+        
+        return False
+
+    def has_obvious_switch_advantage(self, battle: AbstractBattle) -> bool:
+        """检查是否有明显的换人优势 - 借鉴Simple的对位评估"""
+        my_pokemon, opp_pokemon = get_active_pokemon(battle)
+        
+        # 使用Simple的对位评估
+        current_matchup = self._estimate_matchup(my_pokemon, opp_pokemon)
+        
+        # 如果当前对位很差，且有更好的选择
+        if current_matchup < self.SWITCH_OUT_MATCHUP_THRESHOLD:
+            for switch in battle.available_switches:
+                switch_matchup = self._estimate_matchup(switch, opp_pokemon)
+                if switch_matchup > current_matchup + 1.0:  # 明显优势
+                    return True
+        
+        return False
+
+    def should_prioritize_hazards(self, battle: AbstractBattle) -> bool:
+        """检查是否应该优先处理场地 - 借鉴Simple的场地逻辑"""
+        # 开场阶段优先撒钉
+        if battle.turn <= 3:
+            for move in battle.available_moves:
+                if move.id in self.ENTRY_HAZARDS:
+                    hazard_condition = self.ENTRY_HAZARDS[move.id]
+                    if hazard_condition not in battle.opponent_side_conditions:
+                        return True
+        
+        # 有场地需要清除
+        if battle.side_conditions and any(move.id in self.ANTI_HAZARDS_MOVES for move in battle.available_moves):
+            return True
+        
+        return False
+
+    def has_setup_opportunity(self, battle: AbstractBattle) -> bool:
+        """检查是否有强化机会 - 借鉴Simple的强化逻辑"""
+        my_pokemon, opp_pokemon = get_active_pokemon(battle)
+        
+        # 满血且有利对位
+        if (my_pokemon.current_hp_fraction == 1 and 
+            self._estimate_matchup(my_pokemon, opp_pokemon) > 0):
+            
+            for move in battle.available_moves:
+                if (move.boosts and 
+                    sum(move.boosts.values()) >= 2 and 
+                    move.target == "self" and
+                    min([my_pokemon.boosts[s] for s, v in move.boosts.items() if v > 0]) < 6):
+                    return True
+        
+        return False
+
+    def choose_ko_move(self, battle: AbstractBattle) -> Any:
+        """选择KO招式 - 使用Simple的招式选择逻辑"""
+        my_pokemon, opp_pokemon = get_active_pokemon(battle)
+        
+        # 使用Simple的招式评分
+        physical_ratio = self._stat_estimation(my_pokemon, "atk") / self._stat_estimation(opp_pokemon, "def")
+        special_ratio = self._stat_estimation(my_pokemon, "spa") / self._stat_estimation(opp_pokemon, "spd")
+        
+        best_move = max(
+            battle.available_moves,
+            key=lambda m: m.base_power
+            * (1.5 if m.type in my_pokemon.types else 1)
+            * (
+                physical_ratio
+                if m.category == MoveCategory.PHYSICAL
+                else special_ratio
+            )
+            * m.accuracy
+            * m.expected_hits
+            * opp_pokemon.damage_multiplier(m),
+        )
+        
+        return self.create_order(best_move)
+
+    def choose_advantageous_switch(self, battle: AbstractBattle) -> Any:
+        """选择有利的换人 - 使用Simple的换人逻辑"""
+        my_pokemon, opp_pokemon = get_active_pokemon(battle)
+        
+        best_switch = max(
+            battle.available_switches,
+            key=lambda s: self._estimate_matchup(s, opp_pokemon),
+        )
+        
+        return self.create_order(best_switch)
+
+    def choose_hazard_move(self, battle: AbstractBattle) -> Any:
+        """选择场地招式 - 使用Simple的场地逻辑"""
+        # 优先撒钉
+        for move in battle.available_moves:
+            if move.id in self.ENTRY_HAZARDS:
+                hazard_condition = self.ENTRY_HAZARDS[move.id]
+                if hazard_condition not in battle.opponent_side_conditions:
+                    return self.create_order(move)
+        
+        # 清除场地
+        for move in battle.available_moves:
+            if move.id in self.ANTI_HAZARDS_MOVES:
+                return self.create_order(move)
+        
+        return None
+
+    def choose_setup_move(self, battle: AbstractBattle) -> Any:
+        """选择强化招式 - 使用Simple的强化逻辑"""
+        my_pokemon, opp_pokemon = get_active_pokemon(battle)
+        
+        for move in battle.available_moves:
+            if (move.boosts and 
+                sum(move.boosts.values()) >= 2 and 
+                move.target == "self" and
+                min([my_pokemon.boosts[s] for s, v in move.boosts.items() if v > 0]) < 6):
+                return self.create_order(move)
+        
+        return None
+
+    # Simple策略的辅助方法
+    def _stat_estimation(self, mon: Pokemon, stat: str) -> float:
+        """统计估算 - 直接复制Simple的实现"""
+        if mon.boosts[stat] > 1:
+            boost = (2 + mon.boosts[stat]) / 2
+        else:
+            boost = 2 / (2 - mon.boosts[stat])
+        return ((2 * mon.base_stats[stat] + 31) + 5) * boost
+
+    def _estimate_matchup(self, mon: Pokemon, opponent: Pokemon) -> float:
+        """对位评估 - 直接复制Simple的实现"""
+        score = max([opponent.damage_multiplier(t) for t in mon.types if t is not None])
+        score -= max([mon.damage_multiplier(t) for t in opponent.types if t is not None])
+        
+        if mon.base_stats["spe"] > opponent.base_stats["spe"]:
+            score += self.SPEED_TIER_COEFICIENT
+        elif opponent.base_stats["spe"] > mon.base_stats["spe"]:
+            score -= self.SPEED_TIER_COEFICIENT
+        
+        score += mon.current_hp_fraction * self.HP_FRACTION_COEFICIENT
+        score -= opponent.current_hp_fraction * self.HP_FRACTION_COEFICIENT
+        
+        return score
 
     def execute_strategy_pipeline(self, battle: AbstractBattle):
         """主决策函数 - 实现完整的对战策略pipeline"""
