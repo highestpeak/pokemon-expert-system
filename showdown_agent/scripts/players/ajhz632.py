@@ -359,29 +359,30 @@ class CustomAgent(Player):
         
         # **濒死判断**：是 AI 的第一个分支点（Switch vs. Move）
         my_pokemon, _ = get_active_pokemon(battle)
-        if my_pokemon is not None and not my_pokemon.fainted:
-            # **异常状态修正**：必须要有，否则 AI 会傻乎乎地让睡着的宝可梦硬抗
-            self.adjust_for_status(my_pokemon)
-            
-            # 执行完整的策略pipeline
-            best_action = self.execute_strategy_pipeline(battle)
-            
-            # 安全检查：确保返回有效的动作
-            if best_action is None:
-                # 如果策略pipeline返回None，使用随机选择作为后备
-                return self.choose_random_move(battle.available_moves)
-            
-            # 记录行为用于学习
-            self.record_action(best_action, battle)
-            
-            return best_action
-        else:
+        if not my_pokemon or my_pokemon.fainted:
             # 如果 active_pokemon 不存在或为 None，尝试切换
             if battle.available_switches:
                 return self.choose_best_switch(battle.available_switches)
             else:
                 # 如果没有可用的换人选项，使用随机招式
                 return self.choose_random_move(battle.available_moves)
+
+        # **异常状态修正**：必须要有，否则 AI 会傻乎乎地让睡着的宝可梦硬抗
+        self.adjust_for_status(my_pokemon)
+        
+        # 执行完整的策略pipeline
+        best_action = self.execute_strategy_pipeline(battle)
+
+        if best_action:
+            # 记录行为用于学习
+            self.record_action(best_action, battle)
+            return best_action
+
+        if battle.available_switches:
+            return self.choose_best_switch(battle.available_switches)
+        
+        # 如果策略pipeline返回None，使用随机选择作为后备
+        return self.choose_random_move(battle.available_moves)
     
     def adjust_for_status(self, pokemon):
         """异常状态修正"""
@@ -618,7 +619,30 @@ class CustomAgent(Player):
             if move.current_pp > 0:
                 # 基于属性相克计算使用概率
                 opponent_model_effectiveness = self.calculate_move_effectiveness(move, my_pokemon)
-                prob = 0.2 + opponent_model_effectiveness * 0.3  # 基础概率 + 相克加成
+                
+                # 提高基础概率，更符合实际对战
+                if opponent_model_effectiveness >= 4.0:  # 4倍克制
+                    prob = 0.8
+                elif opponent_model_effectiveness >= 2.0:  # 2倍克制
+                    prob = 0.6
+                elif opponent_model_effectiveness >= 1.0:  # 正常效果
+                    prob = 0.4
+                else:  # 效果不好
+                    prob = 0.2
+                
+                # 根据招式威力调整
+                if move.base_power >= 120:
+                    prob += 0.1  # 高威力招式更可能使用
+                elif move.base_power >= 80:
+                    prob += 0.05
+                
+                # 根据招式类型调整
+                move_name = str(move).lower()
+                if move_name in ['recover', 'roost', 'synthesis']:
+                    # 回复技能在低HP时更可能使用
+                    if opp_pokemon.current_hp / opp_pokemon.max_hp < 0.5:
+                        prob += 0.2
+                
                 opp_moves.append({'move': move, 'probability': min(prob, 0.8)})
         
         # 换人预测
@@ -645,11 +669,15 @@ class CustomAgent(Player):
                 resistance *= eff
         
         # 抗性越好，换人概率越高
-        if resistance < 0.5:
-            return 0.7
-        elif resistance < 1.0:
+        if resistance <= 0.25:  # 4倍抗性
+            return 0.8
+        elif resistance <= 0.5:  # 2倍抗性
+            return 0.6
+        elif resistance < 1.0:  # 1.5倍抗性
             return 0.4
-        else:
+        elif resistance == 1.0:  # 正常效果
+            return 0.2
+        else:  # 被克制
             return 0.1
 
     # ============================== 5. 战术选择模块 ==============================
@@ -968,7 +996,7 @@ class CustomAgent(Player):
         urgent_reasons = []
         
         # 条件1：HP过低
-        if my_hp_frac <= 0.20:
+        if my_hp_frac <= 0.12:
             urgent_switch_needed = True
             urgent_reasons.append('low_hp')
         
@@ -992,7 +1020,7 @@ class CustomAgent(Player):
         safe_reasons = []
         
         # 条件1：HP充足
-        if my_hp_frac >= 0.6:
+        if my_hp_frac >= 0.75:
             safe_switch_window = True
             safe_reasons.append('high_hp')
         
@@ -1106,6 +1134,60 @@ class CustomAgent(Player):
                 return True
         
         return False
+
+    def choose_best_switch(self, available_switches):
+        """选择最佳换人"""
+        if not available_switches:
+            return self.choose_random_move(available_switches)
+        
+        # 使用战术评估选择最佳换人
+        switch_utilities = []
+        for switch in available_switches:
+            utility = self.evaluate_switch_utility(switch, self.battle_state, 'momentum_gain')
+            switch_utilities.append((switch, utility))
+        
+        best_switch = max(switch_utilities, key=lambda x: x[1])
+        return self.create_order(best_switch[0])
+    
+    def evaluate_switch_utility(self, switch: Pokemon, battle: AbstractBattle, target: str) -> float:
+        """评估换人效用"""
+        utility = 0.0
+        
+        # 安全获取对手宝可梦
+        opp_pokemon = getattr(battle, 'opponent_active_pokemon', None)
+        if opp_pokemon is not None and hasattr(opp_pokemon, 'fainted'):
+            opp_pokemon = cast(Pokemon, opp_pokemon)
+        
+        if opp_pokemon and opp_pokemon.moves:
+            # 属性相克优势
+            first_move = list(opp_pokemon.moves.values())[0]
+            effectiveness = self.calculate_move_effectiveness(first_move, switch)
+            if effectiveness < 1.0:  # 对手招式效果不好
+                utility += 0.3
+        
+        # 考虑入场伤害（如隐形岩）
+        entry_hazard_damage = self.calculate_entry_hazard_damage(switch, battle)
+        utility -= entry_hazard_damage * 0.01
+        
+        return utility
+    
+    def calculate_entry_hazard_damage(self, pokemon: Pokemon, battle: AbstractBattle) -> float:
+        """计算入场伤害"""
+        damage = 0
+        hazards = self.battle_state.get('hazards_my_side', [])
+        
+        if 'stealthrock' in hazards:
+            # 隐形岩伤害基于属性相克
+            rock_effectiveness = 1.0
+            for pokemon_type in pokemon.types:
+                eff = get_type_effectiveness('ROCK', pokemon_type.name.upper())
+                rock_effectiveness *= eff
+            damage += 12.5 * rock_effectiveness
+        
+        if 'spikes' in hazards:
+            damage += 12.5
+        
+        return damage
 
     # ============================== 8. 动作执行模块 ==============================
     def executor(self, battle: AbstractBattle, action_utilities: List, switch_eval: Dict, priority_actions: List) -> Any:
@@ -1279,41 +1361,6 @@ class CustomAgent(Player):
         })
 
     # ============================== 辅助方法 ==============================
-    def choose_best_switch(self, available_switches):
-        """选择最佳换人"""
-        if not available_switches:
-            return self.choose_random_move(available_switches)
-        
-        # 使用战术评估选择最佳换人
-        switch_utilities = []
-        for switch in available_switches:
-            utility = self.evaluate_switch_utility(switch, self.battle_state, 'momentum_gain')
-            switch_utilities.append((switch, utility))
-        
-        best_switch = max(switch_utilities, key=lambda x: x[1])
-        return self.create_order(best_switch[0])
-    
-    def evaluate_switch_utility(self, switch: Pokemon, battle: AbstractBattle, target: str) -> float:
-        """评估换人效用"""
-        utility = 0.0
-        
-        # 安全获取对手宝可梦
-        opp_pokemon = getattr(battle, 'opponent_active_pokemon', None)
-        if opp_pokemon is not None and hasattr(opp_pokemon, 'fainted'):
-            opp_pokemon = cast(Pokemon, opp_pokemon)
-        
-        if opp_pokemon and opp_pokemon.moves:
-            # 属性相克优势
-            first_move = list(opp_pokemon.moves.values())[0]
-            effectiveness = self.calculate_move_effectiveness(first_move, switch)
-            if effectiveness < 1.0:  # 对手招式效果不好
-                utility += 0.3
-        
-        # 考虑入场伤害（如隐形岩）
-        entry_hazard_damage = self.calculate_entry_hazard_damage(switch, battle)
-        utility -= entry_hazard_damage * 0.01
-        
-        return utility
 
     def calculate_move_effectiveness(self, move: Move, target: Pokemon) -> float:
         """计算招式对目标的相克效果"""
@@ -1347,21 +1394,3 @@ class CustomAgent(Player):
         
         # 默认分类
         return 'other'
-
-    def calculate_entry_hazard_damage(self, pokemon: Pokemon, battle: AbstractBattle) -> float:
-        """计算入场伤害"""
-        damage = 0
-        hazards = self.battle_state.get('hazards_my_side', [])
-        
-        if 'stealthrock' in hazards:
-            # 隐形岩伤害基于属性相克
-            rock_effectiveness = 1.0
-            for pokemon_type in pokemon.types:
-                eff = get_type_effectiveness('ROCK', pokemon_type.name.upper())
-                rock_effectiveness *= eff
-            damage += 12.5 * rock_effectiveness
-        
-        if 'spikes' in hazards:
-            damage += 12.5
-        
-        return damage
