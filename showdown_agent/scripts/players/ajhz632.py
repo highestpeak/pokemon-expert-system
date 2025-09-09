@@ -248,6 +248,24 @@ STRATEGY_CONFIDENCE_THRESHOLDS = {
     'weather_sweep': 0.4
 }
 
+# ============================== 技能优先级 ==============================
+
+# 技能优先级：生存 > 控制 > 强化 > 攻击 > 先制
+PRIORITY_ORDER = ['recovery', 'protection', 'status', 'field', 'setup', 'physical_attack', 'special_attack', 'priority']
+
+# 技能优先级乘数配置
+PRIORITY_MULTIPLIER = {
+    'recovery': 1.2,      # 回复技能优先级最高
+    'protection': 1.1,    # 保护技能次之
+    'status': 1.05,       # 状态技能
+    'field': 1.0,         # 场地技能
+    'setup': 0.9,         # 强化技能
+    'physical_attack': 0.8,  # 物理攻击
+    'special_attack': 0.8,   # 特殊攻击
+    'priority': 0.7,      # 先制技能
+    'other': 0.5          # 其他技能
+}
+
 # ============================== matrix helper ==============================
 
 def get_type_effectiveness(attacking_type, defending_type):
@@ -315,7 +333,30 @@ class CustomAgent(Player):
         self.phase_weights = {}  # 阶段权重
         self.status_adjustments = {}  # 异常状态调整
 
+    def _battle_finished_callback(self, battle: AbstractBattle):
+        """战斗结束时的回调函数，用于清理状态"""
+        # 清理对战状态
+        self.battle_state = {}
+        self.combo_confidences = {}
+        self.phase_weights = {}
+        self.status_adjustments = {}
+        
+        # 调用父类的清理方法
+        super()._battle_finished_callback(battle)
+
     def choose_move(self, battle: AbstractBattle):
+        # **状态更新**：首先更新对战状态
+        self.update_battle_state(battle)
+        
+        # **强制换人判断**：检查是否必须换人
+        if battle.force_switch:
+            # 如果必须换人，选择最佳换人
+            if battle.available_switches:
+                return self.choose_best_switch(battle.available_switches)
+            else:
+                # 如果没有可用的换人选项，使用随机选择
+                return self.choose_random_move(battle.available_moves)
+        
         # **濒死判断**：是 AI 的第一个分支点（Switch vs. Move）
         my_pokemon, _ = get_active_pokemon(battle)
         if my_pokemon is not None and not my_pokemon.fainted:
@@ -325,13 +366,67 @@ class CustomAgent(Player):
             # 执行完整的策略pipeline
             best_action = self.execute_strategy_pipeline(battle)
             
+            # 安全检查：确保返回有效的动作
+            if best_action is None:
+                # 如果策略pipeline返回None，使用随机选择作为后备
+                return self.choose_random_move(battle.available_moves)
+            
             # 记录行为用于学习
             self.record_action(best_action, battle)
             
             return best_action
         else:
             # 如果 active_pokemon 不存在或为 None，尝试切换
-            return self.choose_best_switch(battle.available_switches)
+            if battle.available_switches:
+                return self.choose_best_switch(battle.available_switches)
+            else:
+                # 如果没有可用的换人选项，使用随机招式
+                return self.choose_random_move(battle.available_moves)
+    
+    def adjust_for_status(self, pokemon):
+        """异常状态修正"""
+        # 根据异常状态调整策略
+        if pokemon.status == 'slp':
+            # 睡眠状态：优先使用攻击招式，避免使用需要精确时机的招式
+            self.status_adjustments = {
+                'prefer_attacking': True,
+                'avoid_setup': True,
+                'consider_switch': False
+            }
+        elif pokemon.status == 'par':
+            # 麻痹状态：考虑换人，避免使用速度依赖的招式
+            self.status_adjustments = {
+                'prefer_attacking': False,
+                'avoid_setup': True,
+                'consider_switch': True
+            }
+        elif pokemon.status == 'brn':
+            # 烧伤状态：优先换人，避免物理攻击
+            self.status_adjustments = {
+                'prefer_attacking': False,
+                'avoid_physical': True,
+                'consider_switch': True
+            }
+        elif pokemon.status == 'psn' or pokemon.status == 'tox':
+            # 中毒状态：考虑换人，避免拖延
+            self.status_adjustments = {
+                'prefer_attacking': True,
+                'avoid_stalling': True,
+                'consider_switch': True
+            }
+        elif pokemon.status == 'frz':
+            # 冰冻状态：优先换人
+            self.status_adjustments = {
+                'prefer_attacking': False,
+                'consider_switch': True
+            }
+        else:
+            # 无异常状态
+            self.status_adjustments = {
+                'prefer_attacking': False,
+                'avoid_setup': False,
+                'consider_switch': False
+            }
 
     def execute_strategy_pipeline(self, battle: AbstractBattle):
         """主决策函数 - 实现完整的对战策略pipeline"""
@@ -353,7 +448,7 @@ class CustomAgent(Player):
         # 6. 战术评估
         action_utilities = self.tactical_layer(battle, opp_move_dist, strategic_target, tactical_weights)
         
-        # 7. 换人判定
+        # 7. 换人判定 - "是否换人"的问题（逻辑判定）
         switch_evaluation = self.switch_evaluator(battle, opp_switch_probs)
         
         # 8. 动作执行
@@ -592,9 +687,9 @@ class CustomAgent(Player):
                     'move_type': self.classify_move(move)
                 })
         
-        # 评估换人选项
+        # 评估换人选项 - 换谁的问题 - 数值评估
         for switch in battle.available_switches:
-            utility = self.evaluate_switch_utility(switch, battle, strategic_target, tactical_weights)
+            utility = self.evaluate_switch_utility(switch, battle, strategic_target)
             action_utilities.append({
                 'action': switch,
                 'utility': utility,
@@ -862,119 +957,6 @@ class CustomAgent(Player):
         
         return utility
 
-    def evaluate_move_utility(self, move: Move, battle: AbstractBattle, opp_move_dist: List, target: str) -> float:
-        """评估招式效用"""
-        utility = 0.0
-        
-        # 安全获取对手宝可梦
-        opp_pokemon = getattr(battle, 'opponent_active_pokemon', None)
-        if opp_pokemon is not None and hasattr(opp_pokemon, 'fainted'):
-            opp_pokemon = cast(Pokemon, opp_pokemon)
-        if not opp_pokemon:
-            return utility
-        
-        # 基础伤害计算
-        if move.base_power > 0:
-            damage = self.calculate_damage(move, opp_pokemon)
-            utility += damage * 0.01  # 伤害转换为效用
-        
-        # 属性相克加成
-        effectiveness = self.calculate_move_effectiveness(move, opp_pokemon)
-        utility += effectiveness * 0.2
-        
-        # 战略目标匹配
-        if target == 'hazard_control' and 'defog' in str(move).lower():
-            utility += 0.5
-        elif target == 'setup_disrupt' and 'taunt' in str(move).lower():
-            utility += 0.4
-        
-        # 异常状态调整
-        if hasattr(self, 'status_adjustments'):
-            # 睡眠状态：优先攻击招式
-            if self.status_adjustments.get('prefer_attacking', False) and move.base_power > 0:
-                utility += 0.3
-            
-            # 避免强化招式
-            if self.status_adjustments.get('avoid_setup', False) and self.is_setup_move(move):
-                utility -= 0.5
-            
-            # 避免物理攻击（烧伤状态）
-            if self.status_adjustments.get('avoid_physical', False) and move.category == 'Physical':
-                utility -= 0.4
-            
-            # 避免拖延招式（中毒状态）
-            if self.status_adjustments.get('avoid_stalling', False) and self.is_stalling_move(move):
-                utility -= 0.3
-        
-        # 安全获取我方宝可梦
-        my_pokemon, _ = get_active_pokemon(battle)
-        
-        if my_pokemon:
-            # 考虑对手可能的反应
-            for opp_move in opp_move_dist:
-                if opp_move['probability'] > 0.3:
-                    # 如果对手可能使用克制招式，降低效用
-                    if self.is_move_super_effective(opp_move['move'], my_pokemon):
-                        utility -= 0.2
-        
-        return utility
-
-    def evaluate_switch_utility(self, switch: Pokemon, battle: AbstractBattle, target: str) -> float:
-        """评估换人效用"""
-        utility = 0.0
-        
-        # 安全获取对手宝可梦
-        opp_pokemon = getattr(battle, 'opponent_active_pokemon', None)
-        if opp_pokemon is not None and hasattr(opp_pokemon, 'fainted'):
-            opp_pokemon = cast(Pokemon, opp_pokemon)
-        
-        if opp_pokemon and opp_pokemon.moves:
-            # 属性相克优势
-            first_move = list(opp_pokemon.moves.values())[0]
-            effectiveness = self.calculate_move_effectiveness(first_move, switch)
-            if effectiveness < 1.0:  # 对手招式效果不好
-                utility += 0.3
-        
-        # 考虑入场伤害（如隐形岩）
-        entry_hazard_damage = self.calculate_entry_hazard_damage(switch, battle)
-        utility -= entry_hazard_damage * 0.01
-        
-        return utility
-
-    def calculate_damage(self, move: Move, target: Pokemon) -> float:
-        """简化的伤害计算"""
-        if move.base_power == 0:
-            return 0
-        
-        # 简化的伤害公式
-        base_damage = move.base_power
-        effectiveness = self.calculate_move_effectiveness(move, target)
-        
-        return base_damage * effectiveness
-
-    def is_move_super_effective(self, move: Move, target: Pokemon) -> bool:
-        """判断招式是否效果绝佳"""
-        effectiveness = self.calculate_move_effectiveness(move, target)
-        return effectiveness > 1.5
-
-    def calculate_entry_hazard_damage(self, pokemon: Pokemon, battle: AbstractBattle) -> float:
-        """计算入场伤害"""
-        damage = 0
-        hazards = self.battle_state['hazards_my_side']
-        
-        if 'stealthrock' in hazards:
-            # 隐形岩伤害基于属性相克
-            rock_effectiveness = 1.0
-            for pokemon_type in pokemon.types:
-                eff = get_type_effectiveness('ROCK', pokemon_type.name.upper())
-                rock_effectiveness *= eff
-            damage += 12.5 * rock_effectiveness
-        
-        if 'spikes' in hazards:
-            damage += 12.5
-        
-        return damage
-
     # ============================== 7. 换人判定模块 ==============================
     def switch_evaluator(self, battle: AbstractBattle, opp_switch_probs: List) -> Dict:
         """换人窗口判定 - 紧急换人和主动换人逻辑"""
@@ -1152,7 +1134,7 @@ class CustomAgent(Player):
         
         if not switch_actions:
             # 没有换人选项，选择最安全的招式
-            return self.choose_safest_move(action_utilities)
+            return self.choose_safest_move(action_utilities, battle)
         
         # 选择最安全的换人（考虑入场伤害和属性相克）
         best_switch = None
@@ -1166,7 +1148,7 @@ class CustomAgent(Player):
                 best_safety_score = safety_score
                 best_switch = switch_action['action']
         
-        return best_switch if best_switch else self.choose_safest_move(action_utilities)
+        return self.create_order(best_switch) if best_switch else self.choose_safest_move(action_utilities, battle)
 
     def calculate_switch_safety(self, switch_pokemon: Pokemon, battle: AbstractBattle) -> float:
         """计算换人安全性分数"""
@@ -1208,15 +1190,13 @@ class CustomAgent(Player):
 
     def check_priority_actions(self, action_utilities: List, priority_actions: List, battle: AbstractBattle) -> Any:
         """检查优先级动作"""
-        # 技能优先级：生存 > 控制 > 强化 > 攻击 > 先制
-        priority_order = ['recovery', 'protection', 'status', 'field', 'setup', 'physical_attack', 'special_attack', 'priority']
         
-        for priority_type in priority_order:
+        for priority_type in PRIORITY_ORDER:
             for action in action_utilities:
                 if (action['type'] == 'move' and 
                     action.get('move_type') == priority_type and
                     action['utility'] > 0):  # 只考虑有正效用的动作
-                    return action['action']
+                    return self.create_order(action['action'])
         
         return None
 
@@ -1235,7 +1215,7 @@ class CustomAgent(Player):
         if move_actions:
             best_move = max(move_actions, key=lambda x: x['utility'])
             if best_switch['utility'] > best_move['utility'] + 20.0:  # 换人优势阈值
-                return best_switch['action']
+                return self.create_order(best_switch['action'])
         
         return None
 
@@ -1250,37 +1230,41 @@ class CustomAgent(Player):
             move_type = action.get('move_type', 'other')
             
             # 技能优先级调整
-            priority_multiplier = {
-                'recovery': 1.2,      # 回复技能优先级最高
-                'protection': 1.1,    # 保护技能次之
-                'status': 1.05,       # 状态技能
-                'field': 1.0,         # 场地技能
-                'setup': 0.9,         # 强化技能
-                'physical_attack': 0.8,  # 物理攻击
-                'special_attack': 0.8,   # 特殊攻击
-                'priority': 0.7,      # 先制技能
-                'other': 0.5          # 其他技能
-            }.get(move_type, 1.0)
+            priority_multiplier = PRIORITY_MULTIPLIER.get(move_type, 1.0)
             
             return utility * priority_multiplier
         
         best_action = max(action_utilities, key=action_priority)
-        return best_action['action']
+        action = best_action['action']
+        
+        # 根据动作类型创建正确的订单
+        if best_action['type'] == 'move':
+            return self.create_order(action)
+        elif best_action['type'] == 'switch':
+            return self.create_order(action)
+        else:
+            return self.choose_random_move(battle.available_moves)
 
-    def choose_safest_move(self, action_utilities: List) -> Any:
+    def choose_safest_move(self, action_utilities: List, battle: AbstractBattle = None) -> Any:
         """选择最安全的招式"""
         move_actions = [a for a in action_utilities if a['type'] == 'move']
         
         if not move_actions:
-            return None
+            # 如果没有招式选项，返回一个默认的随机招式
+            if battle and battle.available_moves:
+                return self.choose_random_move(battle.available_moves)
+            else:
+                # 如果连battle都没有，返回None让上层处理
+                return None
         
         # 优先选择保护技能，其次选择风险最低的招式
         protection_actions = [a for a in move_actions if a.get('move_type') == 'protection']
         if protection_actions:
-            return protection_actions[0]['action']
+            return self.create_order(protection_actions[0]['action'])
         
         # 选择效用最高的招式
-        return max(move_actions, key=lambda x: x['utility'])['action']
+        best_action = max(move_actions, key=lambda x: x['utility'])
+        return self.create_order(best_action['action'])
 
     def record_action(self, action: Any, battle: AbstractBattle):
         """记录动作用于学习"""
@@ -1307,91 +1291,30 @@ class CustomAgent(Player):
             switch_utilities.append((switch, utility))
         
         best_switch = max(switch_utilities, key=lambda x: x[1])
-        return best_switch[0]
-
-    def choose_best_move(self, moves, opponent_active):
-        """选择最佳招式"""
-        if not moves:
-            return self.choose_random_move(moves)
-        
-        # 使用战术评估选择最佳招式
-        move_utilities = []
-        for move in moves.values():
-            if move.current_pp > 0:
-                utility = self.evaluate_move_utility(move, self.battle_state, [], 'momentum_gain')
-                move_utilities.append((move, utility))
-        
-        if move_utilities:
-            best_move = max(move_utilities, key=lambda x: x[1])
-            return best_move[0]
-        
-        return self.choose_random_move(moves)
-
-    def adjust_for_status(self, pokemon):
-        """异常状态修正"""
-        # 根据异常状态调整策略
-        if pokemon.status == 'slp':
-            # 睡眠状态：优先使用攻击招式，避免使用需要精确时机的招式
-            self.status_adjustments = {
-                'prefer_attacking': True,
-                'avoid_setup': True,
-                'consider_switch': False
-            }
-        elif pokemon.status == 'par':
-            # 麻痹状态：考虑换人，避免使用速度依赖的招式
-            self.status_adjustments = {
-                'prefer_attacking': False,
-                'avoid_setup': True,
-                'consider_switch': True
-            }
-        elif pokemon.status == 'brn':
-            # 烧伤状态：优先换人，避免物理攻击
-            self.status_adjustments = {
-                'prefer_attacking': False,
-                'avoid_physical': True,
-                'consider_switch': True
-            }
-        elif pokemon.status == 'psn' or pokemon.status == 'tox':
-            # 中毒状态：考虑换人，避免拖延
-            self.status_adjustments = {
-                'prefer_attacking': True,
-                'avoid_stalling': True,
-                'consider_switch': True
-            }
-        elif pokemon.status == 'frz':
-            # 冰冻状态：优先换人
-            self.status_adjustments = {
-                'prefer_attacking': False,
-                'consider_switch': True
-            }
-        else:
-            # 无异常状态
-            self.status_adjustments = {
-                'prefer_attacking': False,
-                'avoid_setup': False,
-                'consider_switch': False
-            }
-
-    def is_setup_move(self, move: Move) -> bool:
-        """判断是否为强化招式"""
-        setup_moves = [
-            'swordsdance', 'dragon dance', 'quiverdance', 'calmmind', 'nastyplot',
-            'bulk up', 'iron defense', 'amnesia', 'agility', 'rock polish',
-            'work up', 'growth', 'hone claws', 'coil', 'shift gear'
-        ]
-        return str(move).lower() in setup_moves
-
-    def is_stalling_move(self, move: Move) -> bool:
-        """判断是否为拖延招式"""
-        stalling_moves = [
-            'protect', 'detect', 'spiky shield', 'baneful bunker', 'obstruct',
-            'substitute', 'rest', 'recover', 'roost', 'synthesis', 'moonlight',
-            'milk drink', 'soft boiled', 'heal order', 'slack off', 'shore up'
-        ]
-        return str(move).lower() in stalling_moves
-
-    # ============================== 辅助方法 ==============================
+        return self.create_order(best_switch[0])
     
+    def evaluate_switch_utility(self, switch: Pokemon, battle: AbstractBattle, target: str) -> float:
+        """评估换人效用"""
+        utility = 0.0
+        
+        # 安全获取对手宝可梦
+        opp_pokemon = getattr(battle, 'opponent_active_pokemon', None)
+        if opp_pokemon is not None and hasattr(opp_pokemon, 'fainted'):
+            opp_pokemon = cast(Pokemon, opp_pokemon)
+        
+        if opp_pokemon and opp_pokemon.moves:
+            # 属性相克优势
+            first_move = list(opp_pokemon.moves.values())[0]
+            effectiveness = self.calculate_move_effectiveness(first_move, switch)
+            if effectiveness < 1.0:  # 对手招式效果不好
+                utility += 0.3
+        
+        # 考虑入场伤害（如隐形岩）
+        entry_hazard_damage = self.calculate_entry_hazard_damage(switch, battle)
+        utility -= entry_hazard_damage * 0.01
+        
+        return utility
+
     def calculate_move_effectiveness(self, move: Move, target: Pokemon) -> float:
         """计算招式对目标的相克效果"""
         if not move.type or not target.types:
@@ -1424,3 +1347,21 @@ class CustomAgent(Player):
         
         # 默认分类
         return 'other'
+
+    def calculate_entry_hazard_damage(self, pokemon: Pokemon, battle: AbstractBattle) -> float:
+        """计算入场伤害"""
+        damage = 0
+        hazards = self.battle_state.get('hazards_my_side', [])
+        
+        if 'stealthrock' in hazards:
+            # 隐形岩伤害基于属性相克
+            rock_effectiveness = 1.0
+            for pokemon_type in pokemon.types:
+                eff = get_type_effectiveness('ROCK', pokemon_type.name.upper())
+                rock_effectiveness *= eff
+            damage += 12.5 * rock_effectiveness
+        
+        if 'spikes' in hazards:
+            damage += 12.5
+        
+        return damage
