@@ -127,6 +127,19 @@ MOVE_CLASSIFICATION = {
     'priority': {
         'extremespeed', 'suckerpunch', 'bulletpunch', 'machpunch',
         'vacuumwave', 'aquajet', 'iceshard', 'shadow sneak'
+    },
+    # 新增：针对低级别格式的技能分类
+    'nu_stall': {
+        'toxic', 'willowisp', 'thunderwave', 'protect', 'substitute',
+        'recover', 'roost', 'synthesis', 'rest', 'slackoff'
+    },
+    'ru_control': {
+        'uturn', 'voltswitch', 'partingshot', 'teleport', 'taunt',
+        'encore', 'haze', 'roar', 'whirlwind', 'defog', 'rapidspin'
+    },
+    'uu_offense': {
+        'swordsdance', 'dragondance', 'calmmind', 'nastyplot',
+        'extremespeed', 'suckerpunch', 'bulletpunch', 'machpunch'
     }
 }
 
@@ -169,11 +182,11 @@ STRATEGIC_TARGETS = {
         'target': 'setup_disrupt',
         'priority_actions': ['taunt', 'encore', 'haze', 'thunderwave', 'willowisp'],
         'tactical_weights': {
-            'W_K': 1.5,  # 提高KO权重
-            'W_D': 1.2,  # 提高伤害权重
-            'W_R': 1.0,  # 风险权重
-            'W_F': 0.3,  # 降低场地权重
-            'W_S': 0.5,  # 降低强化权重
+            'W_K': 1.2,  # 略微提高KO权重，但不要太多以适应低威力环境
+            'W_D': 1.0,  # 略微提高伤害权重，但不要太多以适应低威力环境
+            'W_R': 1.1,  # 稍微提高风险权重
+            'W_F': 0.8,  # 降低场地权重，但不要太多以适应低威力环境，NU/RU更注重控制
+            'W_S': 0.7,  # 降低强化权重，但不要太多以适应低威力环境
             'W_C': 1.0   # 换人成本
         }
     },
@@ -181,11 +194,11 @@ STRATEGIC_TARGETS = {
         'target': 'stall_break',
         'priority_actions': ['taunt', 'attack', 'setup', 'strong_attack'],
         'tactical_weights': {
-            'W_K': 2.0,  # 大幅提高KO权重
-            'W_D': 1.5,  # 提高伤害权重
-            'W_R': 0.8,  # 降低风险权重（受队攻击力低）
-            'W_F': 0.2,  # 大幅降低场地权重
-            'W_S': 0.3,  # 降低强化权重
+            'W_K': 1.5,  # 保持高KO权重，受队需要快速突破
+            'W_D': 1.2,  # 保持高伤害权重
+            'W_R': 0.9,  # 降低风险权重
+            'W_F': 0.5,  # 大幅降低场地权重
+            'W_S': 0.4,  # 降低强化权重
             'W_C': 0.8   # 降低换人成本
         }
     },
@@ -193,12 +206,12 @@ STRATEGIC_TARGETS = {
         'target': 'hazard_control',
         'priority_actions': ['defog', 'rapidspin', 'taunt', 'attack'],
         'tactical_weights': {
-            'W_K': 1.3,  # 提高KO权重
-            'W_D': 1.1,  # 提高伤害权重
-            'W_R': 1.0,  # 风险权重
-            'W_F': 1.5,  # 大幅提高场地权重
-            'W_S': 0.7,  # 降低强化权重
-            'W_C': 1.2   # 提高换人成本
+            'W_K': 1.1,  # 稍微提高KO权重
+            'W_D': 1.0,  # 标准伤害权重
+            'W_R': 1.0,  # 标准风险权重
+            'W_F': 2.0,  # 大幅提高场地权重
+            'W_S': 0.6,  # 降低强化权重
+            'W_C': 1.1   # 稍微提高换人成本
         }
     },
     'trick_room': {
@@ -223,6 +236,43 @@ STRATEGIC_TARGETS = {
             'W_F': 1.3,  # 提高场地权重
             'W_S': 0.6,  # 降低强化权重
             'W_C': 1.0   # 换人成本
+        }
+    },
+    # 新增：针对低级别格式的策略
+    'nu_stall': {
+        'target': 'stall_break',
+        'priority_actions': ['taunt', 'strong_attack', 'setup', 'hazard_removal'],
+        'tactical_weights': {
+            'W_K': 1.5,  # 提高KO权重，受队需要快速突破
+            'W_D': 1.2,  # 提高伤害权重
+            'W_R': 0.8,  # 降低风险权重，受队攻击力低
+            'W_F': 2.0,  # 大幅提高场地权重，NU更注重场地控制
+            'W_S': 1.0,  # 提高强化权重
+            'W_C': 0.7   # 降低换人成本，更灵活换人
+        }
+    },
+    'ru_balance': {
+        'target': 'momentum_gain',
+        'priority_actions': ['attack', 'switch', 'setup'],
+        'tactical_weights': {
+            'W_K': 1.1,  # 稍微提高KO权重
+            'W_D': 1.0,  # 标准伤害权重
+            'W_R': 1.0,  # 标准风险权重
+            'W_F': 1.2,  # 提高场地权重
+            'W_S': 0.9,  # 稍微降低强化权重
+            'W_C': 1.0   # 标准换人成本
+        }
+    },
+    'uu_offense': {
+        'target': 'momentum_gain',
+        'priority_actions': ['attack', 'setup', 'priority'],
+        'tactical_weights': {
+            'W_K': 1.3,  # 提高KO权重
+            'W_D': 1.1,  # 提高伤害权重
+            'W_R': 0.9,  # 降低风险权重
+            'W_F': 0.8,  # 降低场地权重
+            'W_S': 1.1,  # 提高强化权重
+            'W_C': 1.0   # 标准换人成本
         }
     },
     'default': {
@@ -251,7 +301,7 @@ STRATEGY_CONFIDENCE_THRESHOLDS = {
 # ============================== 技能优先级 ==============================
 
 # 技能优先级：生存 > 控制 > 强化 > 攻击 > 先制
-PRIORITY_ORDER = ['recovery', 'protection', 'status', 'field', 'setup', 'physical_attack', 'special_attack', 'priority']
+PRIORITY_ORDER = ['recovery', 'protection', 'status', 'field', 'setup', 'physical_attack', 'special_attack', 'priority', 'nu_stall', 'ru_control', 'uu_offense']
 
 # 技能优先级乘数配置
 PRIORITY_MULTIPLIER = {
@@ -263,6 +313,9 @@ PRIORITY_MULTIPLIER = {
     'physical_attack': 0.8,  # 物理攻击
     'special_attack': 0.8,   # 特殊攻击
     'priority': 0.7,      # 先制技能
+    'nu_stall': 1.15,     # NU受队技能优先级较高
+    'ru_control': 1.1,    # RU控制技能优先级较高
+    'uu_offense': 0.95,   # UU进攻技能优先级稍高
     'other': 0.5          # 其他技能
 }
 
@@ -332,6 +385,7 @@ class CustomAgent(Player):
         self.combo_confidences = {}  # 组合检测置信度
         self.phase_weights = {}  # 阶段权重
         self.status_adjustments = {}  # 异常状态调整
+        self.opponent_threat_level = 'medium'  # 对手威胁等级
 
     def _battle_finished_callback(self, battle: AbstractBattle):
         """战斗结束时的回调函数，用于清理状态"""
@@ -462,6 +516,9 @@ class CustomAgent(Player):
         """更新对战状态和对手历史行为"""
         my_pokemon, opp_pokemon = get_active_pokemon(battle)
         
+        # 更新对手威胁等级
+        self.opponent_threat_level = self.assess_opponent_threat(battle)
+        
         self.battle_state = {
             'my_hp': my_pokemon.current_hp / my_pokemon.max_hp if my_pokemon else 0.0,
             'opp_hp': opp_pokemon.current_hp / opp_pokemon.max_hp if opp_pokemon else 0.0,
@@ -475,7 +532,8 @@ class CustomAgent(Player):
             'terrain': next((field.name.lower().replace('_', ' ') for field in battle.fields.keys() if field.is_terrain), None),
             # 我方和对方场地陷阱
             'hazards_my_side': self.get_hazards(battle, my_side=True),
-            'hazards_opp_side': self.get_hazards(battle, my_side=False)
+            'hazards_opp_side': self.get_hazards(battle, my_side=False),
+            'opponent_threat': self.opponent_threat_level
         }
 
     def get_hazards(self, battle: AbstractBattle, my_side: bool) -> List[str]:
@@ -497,6 +555,29 @@ class CustomAgent(Player):
                 hazards.append('toxicspikes')
         return hazards
 
+    def assess_opponent_threat(self, battle: AbstractBattle) -> str:
+        """评估对手威胁等级"""
+        _, opp_pokemon = get_active_pokemon(battle)
+        if not opp_pokemon:
+            return 'medium'
+        
+        # 检查是否为传说宝可梦
+        legendary_pokemon = ['arceus', 'zacian', 'koraidon', 'rayquaza', 'necrozma', 'eternatus', 'deoxys', 'kingambit']
+        if any(legend in str(opp_pokemon.species).lower() for legend in legendary_pokemon):
+            return 'high'
+        
+        # 检查种族值总和
+        if hasattr(opp_pokemon, 'base_stats'):
+            total_stats = sum(opp_pokemon.base_stats.values())
+            if total_stats > 600:
+                return 'high'
+            elif total_stats > 500:
+                return 'medium'
+            else:
+                return 'low'
+        
+        return 'medium'
+
     # ============================== 2. 组合识别模块 ==============================
     def combo_detector(self, battle: AbstractBattle) -> Dict[str, float]:
         """检测对手可能的组合策略 - 战术反应引擎"""
@@ -511,7 +592,10 @@ class CustomAgent(Player):
             'perish_trap': 0.0,       # 灭亡歌陷阱
             'baton_pass': 0.0,        # 接力队
             'priority_finish': 0.0,   # 先制收割
-            'stall_recovery': 0.0     # 回复受队
+            'stall_recovery': 0.0,    # 回复受队
+            'nu_stall': 0.0,          # NU受队
+            'ru_balance': 0.0,        # RU平衡队
+            'uu_offense': 0.0         # UU进攻队
         }
         
         _, opp_pokemon = get_active_pokemon(battle)
@@ -582,7 +666,93 @@ class CustomAgent(Player):
             if opp_pokemon.base_stats.get('hp', 0) > 100 and opp_pokemon.base_stats.get('defense', 0) > 100:
                 combos['stall_recovery'] += 0.2
         
+        # 检测NU受队模式
+        if self.detect_nu_stall_pattern(opp_pokemon, opp_moves):
+            combos['nu_stall'] = 0.6
+        
+        # 检测RU平衡队模式
+        if self.detect_ru_balance_pattern(opp_pokemon, opp_moves):
+            combos['ru_balance'] = 0.5
+        
+        # 检测UU进攻队模式
+        if self.detect_uu_offense_pattern(opp_pokemon, opp_moves):
+            combos['uu_offense'] = 0.5
+        
         return combos
+
+    def detect_nu_stall_pattern(self, pokemon, moves):
+        """检测NU受队模式"""
+        # NU受队特征：高耐久、回复技能、状态技能
+        stall_indicators = 0
+        
+        # 检查耐久度
+        if hasattr(pokemon, 'base_stats'):
+            hp = pokemon.base_stats.get('hp', 0)
+            defense = pokemon.base_stats.get('defense', 0)
+            sp_defense = pokemon.base_stats.get('special-defense', 0)
+            if hp > 80 and (defense > 80 or sp_defense > 80):
+                stall_indicators += 1
+        
+        # 检查回复技能
+        recovery_moves = ['recover', 'roost', 'synthesis', 'moonlight', 'rest', 'slackoff']
+        if any(move in moves for move in recovery_moves):
+            stall_indicators += 1
+        
+        # 检查状态技能
+        status_moves = ['toxic', 'willowisp', 'thunderwave', 'hypnosis', 'sleepspore']
+        if any(move in moves for move in status_moves):
+            stall_indicators += 1
+        
+        # 检查保护技能
+        protection_moves = ['protect', 'detect', 'substitute']
+        if any(move in moves for move in protection_moves):
+            stall_indicators += 1
+        
+        return stall_indicators >= 2
+
+    def detect_ru_balance_pattern(self, pokemon, moves):
+        """检测RU平衡队模式"""
+        # RU平衡队特征：中等威力、控制技能、换人技能
+        balance_indicators = 0
+        
+        # 检查换人技能
+        switch_moves = ['uturn', 'voltswitch', 'partingshot', 'teleport']
+        if any(move in moves for move in switch_moves):
+            balance_indicators += 1
+        
+        # 检查控制技能
+        control_moves = ['taunt', 'encore', 'haze', 'roar', 'whirlwind']
+        if any(move in moves for move in control_moves):
+            balance_indicators += 1
+        
+        # 检查场地技能
+        field_moves = ['stealthrock', 'spikes', 'toxicspikes', 'defog', 'rapidspin']
+        if any(move in moves for move in field_moves):
+            balance_indicators += 1
+        
+        return balance_indicators >= 2
+
+    def detect_uu_offense_pattern(self, pokemon, moves):
+        """检测UU进攻队模式"""
+        # UU进攻队特征：高威力、强化技能、先制技能
+        offense_indicators = 0
+        
+        # 检查强化技能
+        setup_moves = ['swordsdance', 'dragondance', 'quiverdance', 'calmmind', 'nastyplot']
+        if any(move in moves for move in setup_moves):
+            offense_indicators += 1
+        
+        # 检查高威力技能
+        high_power_moves = [move for move in moves if any(keyword in move for keyword in ['blast', 'cannon', 'strike', 'claw', 'punch'])]
+        if high_power_moves:
+            offense_indicators += 1
+        
+        # 检查先制技能
+        priority_moves = ['extremespeed', 'suckerpunch', 'bulletpunch', 'machpunch', 'vacuumwave']
+        if any(move in moves for move in priority_moves):
+            offense_indicators += 1
+        
+        return offense_indicators >= 2
 
     # ============================== 3. 阶段判定模块 ==============================
     def phase_detector(self, battle: AbstractBattle) -> Tuple[str, Dict[str, float]]:
@@ -990,13 +1160,25 @@ class CustomAgent(Player):
         """换人窗口判定 - 紧急换人和主动换人逻辑"""
         my_hp_frac = self.battle_state['my_hp']
         my_status = self.battle_state['my_status']
+        opponent_threat = self.battle_state.get('opponent_threat', 'medium')
+        
+        # 根据对手威胁度动态调整阈值
+        if opponent_threat == 'high':  # 高威胁对手（传说宝可梦等）
+            urgent_hp_threshold = 0.12
+            safe_hp_threshold = 0.75
+        elif opponent_threat == 'medium':  # 中等威胁（OU级别）
+            urgent_hp_threshold = 0.15
+            safe_hp_threshold = 0.80
+        else:  # 低威胁（NU/RU/UU级别）
+            urgent_hp_threshold = 0.18
+            safe_hp_threshold = 0.85
         
         # 紧急换人判定（优先级最高）
         urgent_switch_needed = False
         urgent_reasons = []
         
-        # 条件1：HP过低
-        if my_hp_frac <= 0.12:
+        # 条件1：HP过低（根据威胁度调整）
+        if my_hp_frac <= urgent_hp_threshold:
             urgent_switch_needed = True
             urgent_reasons.append('low_hp')
         
@@ -1019,8 +1201,8 @@ class CustomAgent(Player):
         safe_switch_window = False
         safe_reasons = []
         
-        # 条件1：HP充足
-        if my_hp_frac >= 0.75:
+        # 条件1：HP充足（根据威胁度调整）
+        if my_hp_frac >= safe_hp_threshold:
             safe_switch_window = True
             safe_reasons.append('high_hp')
         
@@ -1387,9 +1569,15 @@ class CustomAgent(Player):
             else:
                 return 'attack'
         
-        # 2-7. 使用字典结构进行技能分类
+        # 2. 优先检查低级别格式特定分类
+        format_specific_categories = ['nu_stall', 'ru_control', 'uu_offense']
+        for category in format_specific_categories:
+            if move_name in MOVE_CLASSIFICATION.get(category, set()):
+                return category
+        
+        # 3. 使用字典结构进行通用技能分类
         for category, moves in MOVE_CLASSIFICATION.items():
-            if move_name in moves:
+            if category not in format_specific_categories and move_name in moves:
                 return category
         
         # 默认分类
