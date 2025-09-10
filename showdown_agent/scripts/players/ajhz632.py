@@ -5,6 +5,11 @@ from poke_env.battle.side_condition import SideCondition
 from typing import Dict, List, Tuple, Optional, Any, cast
 import random
 import math
+import logging
+import os
+import time
+import json
+from datetime import datetime
 
 team = """
 Arceus-Fairy @ Pixie Plate
@@ -178,9 +183,6 @@ PRIORITY_MOVES = {'extremespeed', 'suckerpunch', 'bulletpunch', 'machpunch', 'va
 
 # 回复受队组合招式
 RECOVERY_MOVES = {'recover', 'roost', 'synthesis', 'moonlight', 'rest', 'slackoff'}
-
-# ============================== Simple策略快速决策常量 ==============================
-# 借鉴SimpleHeuristicsPlayer的常量（将在类内部定义）
 
 # ============================== 队伍组合应对 策略配置常量 ==============================
 # 战略目标配置
@@ -394,19 +396,253 @@ class CustomAgent(Player):
         self.phase_weights = {}  # 阶段权重
         self.status_adjustments = {}  # 异常状态调整
         self.opponent_threat_level = 'medium'  # 对手威胁等级
+        
+        # 初始化日志系统
+        self.battle_id = None
+        self.battle_start_time = None
+        self.battle_logger = None
+        self.performance_stats = {
+            'total_battles': 0,
+            'wins': 0,
+            'losses': 0,
+            'total_turns': 0,
+            'total_decision_time': 0.0,
+            'strategy_usage': {},
+            'opponent_types': {},
+            'damage_calculations': 0,
+            'ko_predictions': 0,
+            'correct_ko_predictions': 0
+        }
+        self.setup_logging()
+
+    def setup_logging(self):
+        """设置日志系统"""
+        # 创建results目录
+        self.results_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'results')
+        os.makedirs(self.results_dir, exist_ok=True)
+        
+        # 设置主日志记录器
+        self.main_logger = logging.getLogger(f'ajhz632_main_{id(self)}')
+        self.main_logger.setLevel(logging.INFO)
+        
+        # 清除现有的处理器
+        for handler in self.main_logger.handlers[:]:
+            self.main_logger.removeHandler(handler)
+        
+        # 创建文件处理器
+        log_file = os.path.join(self.results_dir, 'ajhz632_main.log')
+        file_handler = logging.FileHandler(log_file, encoding='utf-8')
+        file_handler.setLevel(logging.INFO)
+        
+        # 创建格式器
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        file_handler.setFormatter(formatter)
+        
+        self.main_logger.addHandler(file_handler)
+        self.main_logger.info("AJHZ632 Agent initialized")
+
+    def start_battle_logging(self, battle: AbstractBattle):
+        """开始对战日志记录 - 始终创建详细日志，但只在失败时保存"""
+        self.battle_id = f"battle_{int(time.time())}_{battle.battle_tag}"
+        self.battle_start_time = time.time()
+        
+        # 创建对战专用日志记录器
+        self.battle_logger = logging.getLogger(f'ajhz632_battle_{self.battle_id}')
+        self.battle_logger.setLevel(logging.DEBUG)
+        
+        # 清除现有的处理器
+        for handler in self.battle_logger.handlers[:]:
+            self.battle_logger.removeHandler(handler)
+        
+        # 创建内存处理器（StringIO）来临时存储日志
+        import io
+        self.log_buffer = io.StringIO()
+        memory_handler = logging.StreamHandler(self.log_buffer)
+        memory_handler.setLevel(logging.DEBUG)
+        
+        # 创建详细格式器
+        battle_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        memory_handler.setFormatter(battle_formatter)
+        
+        self.battle_logger.addHandler(memory_handler)
+        
+        # 启用详细日志记录
+        self.detailed_logging_enabled = True
+        
+        # 记录对战开始信息
+        self.battle_logger.info(f"=== 对战开始 ===")
+        self.battle_logger.info(f"对战ID: {self.battle_id}")
+        self.battle_logger.info(f"对战标签: {battle.battle_tag}")
+        self.battle_logger.info(f"对手: {getattr(battle, 'opponent_username', 'Unknown')}")
+        
+        # 记录我方队伍
+        my_pokemon, _ = get_active_pokemon(battle)
+        if my_pokemon:
+            self.battle_logger.info(f"我方首发: {my_pokemon.species} (HP: {my_pokemon.current_hp_fraction:.2f})")
+        
+        # 记录对手队伍
+        _, opp_pokemon = get_active_pokemon(battle)
+        if opp_pokemon:
+            self.battle_logger.info(f"对手首发: {opp_pokemon.species} (HP: {opp_pokemon.current_hp_fraction:.2f})")
+            self.battle_logger.info(f"对手招式: {[str(move) for move in opp_pokemon.moves.values()]}")
+        
+        # 记录基本信息到主日志
+        self.main_logger.info(f"开始对战: {self.battle_id} vs {getattr(battle, 'opponent_username', 'Unknown')}")
+
+    def log_decision(self, battle: AbstractBattle, action, decision_time: float, strategy_info: Dict = None):
+        """记录决策过程 - 只在详细日志启用时记录"""
+        # 记录性能统计（无论是否启用详细日志）
+        self.performance_stats['total_decision_time'] += decision_time
+        
+        # 只在详细日志启用时记录详细信息
+        if not self.detailed_logging_enabled or not self.battle_logger:
+            return
+            
+        my_pokemon, opp_pokemon = get_active_pokemon(battle)
+        
+        self.battle_logger.info(f"--- 第 {battle.turn} 回合 ---")
+        self.battle_logger.info(f"决策时间: {decision_time:.3f}秒")
+        
+        if my_pokemon:
+            self.battle_logger.info(f"我方状态: {my_pokemon.species} HP:{my_pokemon.current_hp_fraction:.2f} 状态:{my_pokemon.status}")
+        if opp_pokemon:
+            self.battle_logger.info(f"对手状态: {opp_pokemon.species} HP:{opp_pokemon.current_hp_fraction:.2f} 状态:{opp_pokemon.status}")
+        
+        self.battle_logger.info(f"选择动作: {action}")
+        
+        if strategy_info:
+            self.battle_logger.info(f"策略信息: {strategy_info}")
+
+    def log_damage_calculation(self, move: Move, target: Pokemon, damage_info: Dict):
+        """记录伤害计算 - 只在详细日志启用时记录"""
+        # 记录性能统计（无论是否启用详细日志）
+        self.performance_stats['damage_calculations'] += 1
+        
+        # 只在详细日志启用时记录详细信息
+        if not self.detailed_logging_enabled or not self.battle_logger:
+            return
+        
+        self.battle_logger.debug(f"伤害计算: {move} -> {target.species}")
+        self.battle_logger.debug(f"  基础威力: {move.base_power}")
+        self.battle_logger.debug(f"  期望伤害: {damage_info['mean_damage']:.1f}")
+        self.battle_logger.debug(f"  KO概率: {damage_info['ko_prob']:.2f}")
+
+    def log_ko_prediction(self, predicted_ko: bool, actual_ko: bool):
+        """记录KO预测"""
+        self.performance_stats['ko_predictions'] += 1
+        if predicted_ko == actual_ko:
+            self.performance_stats['correct_ko_predictions'] += 1
+
+    def end_battle_logging(self, battle: AbstractBattle, won: bool):
+        """结束对战日志记录"""
+        battle_duration = time.time() - self.battle_start_time
+        
+        # 更新性能统计
+        self.performance_stats['total_battles'] += 1
+        if won:
+            self.performance_stats['wins'] += 1
+        else:
+            self.performance_stats['losses'] += 1
+        self.performance_stats['total_turns'] += battle.turn
+        
+        # 记录对手类型
+        _, opp_pokemon = get_active_pokemon(battle)
+        if opp_pokemon:
+            opp_type = str(opp_pokemon.species)
+            self.performance_stats['opponent_types'][opp_type] = self.performance_stats['opponent_types'].get(opp_type, 0) + 1
+        
+        # 如果战斗失败，保存详细日志到文件
+        if not won:
+            self.save_detailed_battle_log(battle, battle_duration)
+        
+        # 记录结果到主日志
+        self.main_logger.info(f"对战结束: {self.battle_id} - {'胜利' if won else '失败'} ({battle.turn}回合, {battle_duration:.2f}秒)")
+        
+        # 更新总体性能统计
+        self.update_performance_summary()
+
+    def save_detailed_battle_log(self, battle: AbstractBattle, battle_duration: float):
+        """保存失败的战斗详细日志到文件"""
+        if not hasattr(self, 'log_buffer') or not self.battle_logger:
+            return
+        
+        # 记录对战结束信息到内存日志
+        self.battle_logger.info(f"=== 对战结束 ===")
+        self.battle_logger.info(f"结果: 失败")
+        self.battle_logger.info(f"对战时长: {battle_duration:.2f}秒")
+        self.battle_logger.info(f"总回合数: {battle.turn}")
+        
+        # 将内存中的日志内容写入文件
+        battle_log_file = os.path.join(self.results_dir, f'{self.battle_id}.log')
+        with open(battle_log_file, 'w', encoding='utf-8') as f:
+            f.write(self.log_buffer.getvalue())
+        
+        # 清理内存缓冲区
+        self.log_buffer.close()
+        self.log_buffer = None
+
+    def update_performance_summary(self):
+        """更新性能汇总文件"""
+        summary_file = os.path.join(self.results_dir, 'performance_summary.json')
+        
+        # 计算胜率
+        win_rate = self.performance_stats['wins'] / self.performance_stats['total_battles'] if self.performance_stats['total_battles'] > 0 else 0
+        
+        # 计算平均决策时间
+        avg_decision_time = self.performance_stats['total_decision_time'] / self.performance_stats['total_turns'] if self.performance_stats['total_turns'] > 0 else 0
+        
+        # 计算KO预测准确率
+        ko_accuracy = self.performance_stats['correct_ko_predictions'] / self.performance_stats['ko_predictions'] if self.performance_stats['ko_predictions'] > 0 else 0
+        
+        performance_summary = {
+            'total_battles': self.performance_stats['total_battles'],
+            'wins': self.performance_stats['wins'],
+            'losses': self.performance_stats['losses'],
+            'win_rate': win_rate,
+            'total_turns': self.performance_stats['total_turns'],
+            'avg_decision_time': avg_decision_time,
+            'damage_calculations': self.performance_stats['damage_calculations'],
+            'ko_predictions': self.performance_stats['ko_predictions'],
+            'ko_accuracy': ko_accuracy,
+            'strategy_usage': self.performance_stats['strategy_usage'],
+            'opponent_types': self.performance_stats['opponent_types'],
+            'last_updated': datetime.now().isoformat()
+        }
+        
+        with open(summary_file, 'w', encoding='utf-8') as f:
+            json.dump(performance_summary, f, indent=2, ensure_ascii=False)
 
     def _battle_finished_callback(self, battle: AbstractBattle):
         """战斗结束时的回调函数，用于清理状态"""
+        # 记录对战结果
+        won = battle.won
+        self.end_battle_logging(battle, won)
+        
         # 清理对战状态
         self.battle_state = {}
         self.combo_confidences = {}
         self.phase_weights = {}
         self.status_adjustments = {}
+        self.battle_logger = None
+        self.battle_id = None
+        self.detailed_logging_enabled = False
+        
+        # 清理内存缓冲区（如果存在）
+        if hasattr(self, 'log_buffer') and self.log_buffer:
+            self.log_buffer.close()
+            self.log_buffer = None
         
         # 调用父类的清理方法
         super()._battle_finished_callback(battle)
 
     def choose_move(self, battle: AbstractBattle):
+        # 开始计时
+        decision_start_time = time.time()
+        
+        # 如果是第一回合，开始对战日志记录
+        if battle.turn == 1 and not self.battle_logger:
+            self.start_battle_logging(battle)
+        
         # **状态更新**：首先更新对战状态
         self.update_battle_state(battle)
         
@@ -414,24 +650,42 @@ class CustomAgent(Player):
         if battle.force_switch:
             # 如果必须换人，选择最佳换人
             if battle.available_switches:
-                return self.choose_best_switch(battle.available_switches)
+                action = self.choose_best_switch(battle.available_switches)
+                decision_time = time.time() - decision_start_time
+                self.log_decision(battle, action, decision_time, {'reason': 'force_switch'})
+                return action
             else:
                 # 如果没有可用的换人选项，使用随机选择
-                return self.choose_random_move(battle.available_moves)
+                action = self.choose_random_move(battle.available_moves)
+                decision_time = time.time() - decision_start_time
+                self.log_decision(battle, action, decision_time, {'reason': 'force_switch_no_switches'})
+                return action
         
         # **濒死判断**：是 AI 的第一个分支点（Switch vs. Move）
         my_pokemon, _ = get_active_pokemon(battle)
         if not my_pokemon or my_pokemon.fainted:
             # 如果 active_pokemon 不存在或为 None，尝试切换
             if battle.available_switches:
-                return self.choose_best_switch(battle.available_switches)
+                action = self.choose_best_switch(battle.available_switches)
+                decision_time = time.time() - decision_start_time
+                self.log_decision(battle, action, decision_time, {'reason': 'pokemon_fainted'})
+                return action
             else:
                 # 如果没有可用的换人选项，使用随机招式
-                return self.choose_random_move(battle.available_moves)
+                action = self.choose_random_move(battle.available_moves)
+                decision_time = time.time() - decision_start_time
+                self.log_decision(battle, action, decision_time, {'reason': 'pokemon_fainted_no_switches'})
+                return action
 
         # **异常状态修正**：必须要有，否则 AI 会傻乎乎地让睡着的宝可梦硬抗
         self.adjust_for_status(my_pokemon)
         
+        # 优先尝试高伤害攻击
+        high_damage_action = self.choose_high_damage_move(battle)
+        if high_damage_action:
+            decision_time = time.time() - decision_start_time
+            self.log_decision(battle, high_damage_action, decision_time, {'reason': 'high_damage_priority'})
+            return high_damage_action
         
         # 执行完整的策略pipeline（保持原有复杂逻辑）
         best_action = self.execute_strategy_pipeline(battle)
@@ -439,13 +693,21 @@ class CustomAgent(Player):
         if best_action:
             # 记录行为用于学习
             self.record_action(best_action, battle)
+            decision_time = time.time() - decision_start_time
+            self.log_decision(battle, best_action, decision_time, {'reason': 'strategy_pipeline'})
             return best_action
 
         if battle.available_switches:
-            return self.choose_best_switch(battle.available_switches)
+            action = self.choose_best_switch(battle.available_switches)
+            decision_time = time.time() - decision_start_time
+            self.log_decision(battle, action, decision_time, {'reason': 'fallback_switch'})
+            return action
         
         # 如果策略pipeline返回None，使用随机选择作为后备
-        return self.choose_random_move(battle.available_moves)
+        action = self.choose_random_move(battle.available_moves)
+        decision_time = time.time() - decision_start_time
+        self.log_decision(battle, action, decision_time, {'reason': 'fallback_random'})
+        return action
     
     def adjust_for_status(self, pokemon):
         """异常状态修正"""
@@ -908,7 +1170,7 @@ class CustomAgent(Player):
 
     def evaluate_action_utility(self, move: Move, battle: AbstractBattle, opp_move_dist: List, 
                               strategic_target: str, tactical_weights: Dict) -> float:
-        """基于技能分类的动作效用评估 - 数值决策引擎核心"""
+        """改进的动作效用评估 - 加入生存机制和风险规避"""
         move_type = self.classify_move(move)
         utility = 0.0
 
@@ -918,15 +1180,31 @@ class CustomAgent(Player):
         if not my_pokemon or not opp_pokemon:
             return utility
         
+        my_hp_frac = my_pokemon.current_hp / my_pokemon.max_hp
+        opp_hp_frac = opp_pokemon.current_hp / opp_pokemon.max_hp
+        
+        # 生存风险评估
+        survival_risk = self.assess_survival_risk(battle, my_pokemon, opp_pokemon)
+        
         # 基础伤害计算
         if move.base_power > 0:
             dmg_info = self.calculate_detailed_damage(move, opp_pokemon, battle)
             P_my_KO = dmg_info['ko_prob']
             E_dmg = dmg_info['mean_damage']
             
-            # 攻击技能效用
-            utility += (tactical_weights['W_K'] * P_my_KO * 100.0 +  # KO概率价值
-                       tactical_weights['W_D'] * E_dmg * 0.1)        # 伤害价值
+            # 记录伤害计算
+            self.log_damage_calculation(move, opp_pokemon, dmg_info)
+            
+            # 攻击技能效用（根据生存风险调整）
+            ko_value = tactical_weights['W_K'] * P_my_KO * 100.0
+            dmg_value = tactical_weights['W_D'] * E_dmg * 0.1
+            
+            # 高生存风险时降低攻击价值
+            if survival_risk > 0.7:
+                ko_value *= 0.5
+                dmg_value *= 0.7
+            
+            utility += ko_value + dmg_value
         
         # 计算对手反击风险
         P_opp_incoming_KO = 0.0
@@ -937,18 +1215,25 @@ class CustomAgent(Player):
                 )
                 P_opp_incoming_KO += opp_move['probability'] * opp_dmg_info['ko_prob']
         
-        # 风险惩罚
-        utility -= tactical_weights['W_R'] * P_opp_incoming_KO * 50.0
+        # 风险惩罚（根据生存风险调整）
+        risk_penalty = tactical_weights['W_R'] * P_opp_incoming_KO * 50.0
+        if survival_risk > 0.5:
+            risk_penalty *= 1.5  # 高生存风险时增加风险惩罚
+        utility -= risk_penalty
         
         # 根据技能类型添加特殊效用
         if move_type == 'setup':
-            # 强化技能：考虑未来回合收益
+            # 强化技能：考虑未来回合收益和生存风险
             setup_value = self.estimate_setup_value(move, battle, tactical_weights)
+            if survival_risk > 0.6:  # 高生存风险时降低强化价值
+                setup_value *= 0.3
             utility += tactical_weights['W_S'] * setup_value
             
         elif move_type == 'recovery':
-            # 回复技能：生存时间延长价值
+            # 回复技能：生存时间延长价值（高生存风险时更重要）
             recovery_value = self.estimate_recovery_value(move, battle)
+            if survival_risk > 0.5:
+                recovery_value *= 1.5  # 高生存风险时增加回复价值
             utility += recovery_value * 30.0
             
         elif move_type == 'status':
@@ -962,8 +1247,10 @@ class CustomAgent(Player):
             utility += tactical_weights['W_F'] * field_value
             
         elif move_type == 'protection':
-            # 保护技能：防御和探招价值
+            # 保护技能：防御和探招价值（高生存风险时更重要）
             protection_value = self.estimate_protection_value(move, battle, opp_move_dist)
+            if survival_risk > 0.6:
+                protection_value *= 2.0  # 高生存风险时大幅增加保护价值
             utility += protection_value * 20.0
             
         elif move_type == 'priority':
@@ -975,10 +1262,66 @@ class CustomAgent(Player):
         if hasattr(self, 'status_adjustments'):
             utility = self.apply_status_adjustments(utility, move, move_type)
         
+        # 生存机制调整
+        utility = self.apply_survival_adjustments(utility, move, move_type, survival_risk, my_hp_frac)
+        
+        return utility
+
+    def assess_survival_risk(self, battle: AbstractBattle, my_pokemon: Pokemon, opp_pokemon: Pokemon) -> float:
+        """评估生存风险（0-1，越高越危险）"""
+        risk = 0.0
+        
+        # 1. HP风险
+        my_hp_frac = my_pokemon.current_hp / my_pokemon.max_hp
+        if my_hp_frac < 0.2:
+            risk += 0.6
+        elif my_hp_frac < 0.4:
+            risk += 0.4
+        elif my_hp_frac < 0.6:
+            risk += 0.2
+        
+        # 2. 属性克制风险
+        if self.is_severely_weak_to_opponent(battle):
+            risk += 0.4
+        
+        # 3. 对手威胁风险
+        if self.opponent_has_high_threat_moves(battle):
+            risk += 0.3
+        
+        # 4. 速度劣势风险
+        my_speed = my_pokemon.base_stats.get('speed', 0)
+        opp_speed = opp_pokemon.base_stats.get('speed', 0)
+        if opp_speed > my_speed * 1.2:  # 对手明显更快
+            risk += 0.2
+        
+        # 5. 异常状态风险
+        if my_pokemon.status in ['slp', 'frz', 'par']:
+            risk += 0.3
+        
+        return min(risk, 1.0)
+
+    def apply_survival_adjustments(self, utility: float, move: Move, move_type: str, survival_risk: float, my_hp_frac: float) -> float:
+        """应用生存机制调整"""
+        # 高生存风险时的调整
+        if survival_risk > 0.7:
+            if move_type in ['physical_attack', 'special_attack']:
+                utility *= 0.3  # 大幅降低攻击技能价值
+            elif move_type == 'setup':
+                utility *= 0.1  # 几乎不使用强化技能
+            elif move_type in ['recovery', 'protection']:
+                utility *= 2.0  # 大幅增加生存技能价值
+        
+        # 低HP时的调整
+        if my_hp_frac < 0.3:
+            if move_type in ['recovery', 'protection']:
+                utility += 50.0  # 大幅增加生存技能价值
+            elif move_type in ['physical_attack', 'special_attack']:
+                utility -= 30.0  # 降低攻击技能价值
+        
         return utility
 
     def calculate_detailed_damage(self, move: Move, target: Pokemon, battle: AbstractBattle) -> Dict:
-        """简化的伤害计算 - 基于基础公式但更稳定"""
+        """改进的伤害计算 - 修复类型相克和KO预测"""
         if move.base_power == 0:
             return {'ko_prob': 0.0, 'mean_damage': 0.0, 'min_damage': 0.0, 'max_damage': 0.0}
         
@@ -986,10 +1329,20 @@ class CustomAgent(Player):
         if not my_pokemon or not opp_pokemon:
             return {'ko_prob': 0.0, 'mean_damage': 0.0, 'min_damage': 0.0, 'max_damage': 0.0}
         
-        # 1. 基础伤害计算（简化但稳定）
-        base_damage = move.base_power
+        # 基础威力
+        base_power = move.base_power
         
-        # 2. STAB加成（修正：攻击方属性与招式属性匹配）
+        # 类型相克 - 使用更准确的计算
+        try:
+            type_effectiveness = float(target.damage_multiplier(move))
+        except:
+            type_effectiveness = self.calculate_move_effectiveness(move, target)
+        
+        # 如果类型相克为0，直接返回0伤害
+        if type_effectiveness == 0:
+            return {'ko_prob': 0.0, 'mean_damage': 0.0, 'min_damage': 0.0, 'max_damage': 0.0}
+        
+        # STAB加成
         stab_multiplier = 1.0
         if move.type and my_pokemon.types:
             for my_type in my_pokemon.types:
@@ -997,63 +1350,40 @@ class CustomAgent(Player):
                     stab_multiplier = 1.5
                     break
         
-        # 3. 类型相克（优先使用内置API，失败则用备用方案）
-        try:
-            type_effectiveness = float(target.damage_multiplier(move))
-        except:
-            type_effectiveness = self.calculate_move_effectiveness(move, target)
+        # 改进的伤害计算 - 使用更合理的公式
+        # 基础伤害 = 基础威力 * 类型相克 * STAB * 等级修正
+        level_factor = 0.44  # 等级50的修正因子
+        base_damage = base_power * level_factor * type_effectiveness * stab_multiplier
         
-        # 4. 天气修正（简化）
-        weather_multiplier = 1.0
-        if battle.weather:
-            weather = str(battle.weather).lower()
-            move_type_name = move.type.name.lower() if move.type else ""
-            
-            if "sun" in weather and move_type_name == "fire":
-                weather_multiplier = 1.5
-            elif "rain" in weather and move_type_name == "water":
-                weather_multiplier = 1.5
-            elif "sun" in weather and move_type_name == "water":
-                weather_multiplier = 0.5
-            elif "rain" in weather and move_type_name == "fire":
-                weather_multiplier = 0.5
-        
-        # 5. 状态修正（简化）
-        status_multiplier = 1.0
-        if my_pokemon.status == 'brn' and move.category == 'Physical':
-            status_multiplier = 0.5
-        
-        # 6. 计算最终伤害（使用更保守的公式）
-        total_damage = base_damage * stab_multiplier * type_effectiveness * weather_multiplier * status_multiplier
-        
-        # 7. 应用等级和种族值修正（简化版）
-        level = 50
-        # 假设攻击方和防御方种族值相等，简化计算
-        stat_multiplier = 0.5  # 保守估计
-        total_damage *= stat_multiplier
-        
-        # 8. 随机因子（85%-100%）
-        min_damage = total_damage * 0.85
-        max_damage = total_damage * 1.0
+        # 随机因子（85%-100%）
+        min_damage = base_damage * 0.85
+        max_damage = base_damage * 1.0
         mean_damage = (min_damage + max_damage) / 2
         
-        # 9. 计算KO概率（保守估计）
-        target_hp_frac = target.current_hp / target.max_hp if target.max_hp > 0 else 1.0
-        target_current_hp = target_hp_frac * target.max_hp
+        # 改进的KO概率计算
+        target_current_hp = target.current_hp
         
-        # 基于期望伤害计算KO概率（更保守）
         if mean_damage >= target_current_hp:
-            ko_prob = 0.8  # 即使伤害足够也不100%确定
+            ko_prob = 0.95  # 期望伤害足够KO
+        elif max_damage >= target_current_hp:
+            ko_prob = 0.75  # 最大伤害可能KO
         elif min_damage >= target_current_hp:
-            ko_prob = 0.4  # 保守估计
+            ko_prob = 0.25  # 最小伤害可能KO
         else:
-            # 基于伤害比例估算KO概率，但更保守
+            # 基于伤害比例估算KO概率
             damage_ratio = mean_damage / target_current_hp if target_current_hp > 0 else 0
-            ko_prob = max(0.0, min(damage_ratio * 0.5, 0.7))  # 更保守的估计
+            if damage_ratio >= 0.8:
+                ko_prob = 0.6
+            elif damage_ratio >= 0.6:
+                ko_prob = 0.4
+            elif damage_ratio >= 0.4:
+                ko_prob = 0.2
+            else:
+                ko_prob = 0.1
         
         return {
             'ko_prob': min(ko_prob, 1.0),
-            'mean_damage': max(mean_damage, 0.0),  # 确保非负
+            'mean_damage': max(mean_damage, 0.0),
             'min_damage': max(min_damage, 0.0),
             'max_damage': max(max_damage, 0.0)
         }
@@ -1217,27 +1547,36 @@ class CustomAgent(Player):
 
     # ============================== 7. 换人判定模块 ==============================
     def switch_evaluator(self, battle: AbstractBattle, opp_switch_probs: List) -> Dict:
-        """换人窗口判定 - 紧急换人和主动换人逻辑"""
+        """改进的换人窗口判定 - 更智能的换人逻辑"""
         my_hp_frac = self.battle_state['my_hp']
         my_status = self.battle_state['my_status']
         opponent_threat = self.battle_state.get('opponent_threat', 'medium')
+        turn_count = self.battle_state['turn_count']
         
-        # 根据对手威胁度动态调整阈值
+        # 根据对手威胁度和对战阶段动态调整阈值 - 更保守的策略
         if opponent_threat == 'high':  # 高威胁对手（传说宝可梦等）
-            urgent_hp_threshold = 0.12
-            safe_hp_threshold = 0.75
+            urgent_hp_threshold = 0.10
+            safe_hp_threshold = 0.50
         elif opponent_threat == 'medium':  # 中等威胁（OU级别）
             urgent_hp_threshold = 0.15
-            safe_hp_threshold = 0.80
+            safe_hp_threshold = 0.60
         else:  # 低威胁（NU/RU/UU级别）
-            urgent_hp_threshold = 0.18
-            safe_hp_threshold = 0.85
+            urgent_hp_threshold = 0.20
+            safe_hp_threshold = 0.70
+        
+        # 根据对战阶段调整阈值
+        if turn_count <= 5:  # 早期阶段更保守
+            urgent_hp_threshold += 0.05
+            safe_hp_threshold += 0.05
+        elif turn_count >= 20:  # 后期阶段更激进
+            urgent_hp_threshold -= 0.05
+            safe_hp_threshold -= 0.05
         
         # 紧急换人判定（优先级最高）
         urgent_switch_needed = False
         urgent_reasons = []
         
-        # 条件1：HP过低（根据威胁度调整）
+        # 条件1：HP过低（根据威胁度和阶段调整）
         if my_hp_frac <= urgent_hp_threshold:
             urgent_switch_needed = True
             urgent_reasons.append('low_hp')
@@ -1257,24 +1596,35 @@ class CustomAgent(Player):
             urgent_switch_needed = True
             urgent_reasons.append('priority_threat')
         
+        # 条件5：对手有高威胁招式且我方无法有效反击
+        if self.opponent_has_high_threat_moves(battle) and not self.can_effectively_counter(battle):
+            urgent_switch_needed = True
+            urgent_reasons.append('high_threat_moves')
+        
         # 主动换人判定（安全窗口）
         safe_switch_window = False
         safe_reasons = []
         
-        # 条件1：HP充足（根据威胁度调整）
+        # 条件1：HP充足且有明显优势的换人选项
         if my_hp_frac >= safe_hp_threshold:
-            safe_switch_window = True
-            safe_reasons.append('high_hp')
+            if self.has_significant_advantage_switch_options(battle):
+                safe_switch_window = True
+                safe_reasons.append('high_hp_advantage')
         
         # 条件2：对手刚换入且可能不直接攻击
         if self.opponent_just_switched_and_may_not_attack(battle, opp_switch_probs):
             safe_switch_window = True
             safe_reasons.append('opponent_switch')
         
-        # 条件3：有属性优势的换人选项
-        if self.has_advantageous_switch_options(battle):
+        # 条件3：有属性优势的换人选项且当前宝可梦效率不高
+        if self.has_advantageous_switch_options(battle) and self.current_pokemon_ineffective(battle):
             safe_switch_window = True
-            safe_reasons.append('type_advantage')
+            safe_reasons.append('type_advantage_ineffective')
+        
+        # 条件4：需要回复或清除状态
+        if my_hp_frac < 0.6 and self.has_recovery_options(battle):
+            safe_switch_window = True
+            safe_reasons.append('need_recovery')
         
         return {
             'urgent_switch_needed': urgent_switch_needed,
@@ -1376,6 +1726,121 @@ class CustomAgent(Player):
                 return True
         
         return False
+
+    def has_significant_advantage_switch_options(self, battle: AbstractBattle) -> bool:
+        """检查是否有明显优势的换人选项"""
+        if not battle.available_switches:
+            return False
+        
+        opp_pokemon = getattr(battle, 'opponent_active_pokemon', None)
+        if opp_pokemon is not None and hasattr(opp_pokemon, 'fainted'):
+            opp_pokemon = cast(Pokemon, opp_pokemon)
+        
+        if not opp_pokemon or not opp_pokemon.moves:
+            return False
+        
+        # 检查是否有明显克制对手的换人选项
+        for switch in battle.available_switches:
+            advantage_score = 0
+            for move in opp_pokemon.moves.values():
+                if move.base_power > 0:
+                    effectiveness = self.calculate_move_effectiveness(move, switch)
+                    if effectiveness <= 0.5:  # 2倍抗性
+                        advantage_score += 2
+                    elif effectiveness < 1.0:  # 1.5倍抗性
+                        advantage_score += 1
+            
+            if advantage_score >= 3:  # 有明显优势
+                return True
+        
+        return False
+
+    def current_pokemon_ineffective(self, battle: AbstractBattle) -> bool:
+        """检查当前宝可梦是否效率不高"""
+        my_pokemon, opp_pokemon = get_active_pokemon(battle)
+        
+        if not my_pokemon or not opp_pokemon:
+            return False
+        
+        # 检查是否有有效招式
+        effective_moves = 0
+        for move in my_pokemon.moves.values():
+            if move.base_power > 0:
+                effectiveness = self.calculate_move_effectiveness(move, opp_pokemon)
+                if effectiveness >= 1.0:  # 有效果
+                    effective_moves += 1
+        
+        return effective_moves < 2  # 有效招式少于2个
+
+    def opponent_has_high_threat_moves(self, battle: AbstractBattle) -> bool:
+        """检查对手是否有高威胁招式"""
+        opp_pokemon = getattr(battle, 'opponent_active_pokemon', None)
+        if opp_pokemon is not None and hasattr(opp_pokemon, 'fainted'):
+            opp_pokemon = cast(Pokemon, opp_pokemon)
+        
+        if not opp_pokemon or not opp_pokemon.moves:
+            return False
+        
+        # 检查是否有高威力招式
+        for move in opp_pokemon.moves.values():
+            if move.base_power >= 120:  # 高威力招式
+                return True
+        
+        return False
+
+    def can_effectively_counter(self, battle: AbstractBattle) -> bool:
+        """检查是否能有效反击对手"""
+        my_pokemon, opp_pokemon = get_active_pokemon(battle)
+        
+        if not my_pokemon or not opp_pokemon:
+            return False
+        
+        # 检查是否有能有效反击的招式
+        for move in my_pokemon.moves.values():
+            if move.base_power > 0:
+                effectiveness = self.calculate_move_effectiveness(move, opp_pokemon)
+                if effectiveness >= 2.0:  # 2倍克制
+                    return True
+        
+        return False
+
+    def has_recovery_options(self, battle: AbstractBattle) -> bool:
+        """检查是否有回复选项"""
+        if not battle.available_switches:
+            return False
+        
+        # 检查换人选项中是否有回复技能
+        for switch in battle.available_switches:
+            for move in switch.moves.values():
+                move_name = str(move).lower()
+                if move_name in ['recover', 'roost', 'synthesis', 'moonlight', 'rest', 'slackoff']:
+                    return True
+        
+        return False
+
+    def choose_high_damage_move(self, battle: AbstractBattle) -> Optional[Any]:
+        """选择高伤害攻击技能"""
+        my_pokemon, opp_pokemon = get_active_pokemon(battle)
+        if not my_pokemon or not opp_pokemon:
+            return None
+        
+        best_move = None
+        best_damage = 0
+        
+        for move in battle.available_moves:
+            if move.base_power > 0:  # 只考虑攻击技能
+                damage_info = self.calculate_detailed_damage(move, opp_pokemon, battle)
+                mean_damage = damage_info['mean_damage']
+                
+                # 选择期望伤害最高的技能
+                if mean_damage > best_damage:
+                    best_damage = mean_damage
+                    best_move = move
+        
+        if best_move and best_damage > 0:
+            return self.create_order(best_move)
+        
+        return None
 
     def choose_best_switch(self, available_switches):
         """选择最佳换人"""
@@ -1513,16 +1978,98 @@ class CustomAgent(Player):
         return safety_score
 
     def check_priority_actions(self, action_utilities: List, priority_actions: List, battle: AbstractBattle) -> Any:
-        """检查优先级动作"""
+        """改进的优先级动作检查 - 更智能的优先级判断"""
+        my_pokemon, opp_pokemon = get_active_pokemon(battle)
+        if not my_pokemon or not opp_pokemon:
+            return None
         
-        for priority_type in PRIORITY_ORDER:
+        my_hp_frac = my_pokemon.current_hp / my_pokemon.max_hp
+        opp_hp_frac = opp_pokemon.current_hp / opp_pokemon.max_hp
+        
+        # 根据当前情况调整优先级
+        adjusted_priorities = self.get_adjusted_priorities(battle, my_hp_frac, opp_hp_frac)
+        
+        for priority_type in adjusted_priorities:
             for action in action_utilities:
                 if (action['type'] == 'move' and 
                     action.get('move_type') == priority_type and
                     action['utility'] > 0):  # 只考虑有正效用的动作
-                    return self.create_order(action['action'])
+                    
+                    # 额外检查：确保动作在当前情况下是合理的
+                    if self.is_action_reasonable(action, battle, my_hp_frac, opp_hp_frac):
+                        return self.create_order(action['action'])
         
         return None
+
+    def get_adjusted_priorities(self, battle: AbstractBattle, my_hp_frac: float, opp_hp_frac: float) -> List[str]:
+        """根据当前情况调整优先级顺序"""
+        base_priorities = PRIORITY_ORDER.copy()
+        
+        # 根据HP情况调整优先级
+        if my_hp_frac < 0.3:  # 低HP时优先生存
+            # 将回复和保护技能提到最高优先级
+            survival_priorities = ['recovery', 'protection', 'status']
+            for priority in survival_priorities:
+                if priority in base_priorities:
+                    base_priorities.remove(priority)
+                    base_priorities.insert(0, priority)
+        
+        elif my_hp_frac > 0.8 and opp_hp_frac < 0.3:  # 高HP且对手低HP时优先攻击
+            # 将攻击技能提到更高优先级
+            attack_priorities = ['physical_attack', 'special_attack', 'priority']
+            for priority in attack_priorities:
+                if priority in base_priorities:
+                    base_priorities.remove(priority)
+                    base_priorities.insert(2, priority)  # 在回复和保护之后
+        
+        # 根据对战阶段调整
+        turn_count = battle.turn
+        if turn_count <= 3:  # 早期阶段
+            # 优先场地控制和状态技能
+            early_priorities = ['field', 'status', 'setup']
+            for priority in early_priorities:
+                if priority in base_priorities:
+                    base_priorities.remove(priority)
+                    base_priorities.insert(1, priority)
+        
+        elif turn_count >= 15:  # 后期阶段
+            # 优先攻击和先制技能
+            late_priorities = ['priority', 'physical_attack', 'special_attack']
+            for priority in late_priorities:
+                if priority in base_priorities:
+                    base_priorities.remove(priority)
+                    base_priorities.insert(0, priority)
+        
+        return base_priorities
+
+    def is_action_reasonable(self, action: Dict, battle: AbstractBattle, my_hp_frac: float, opp_hp_frac: float) -> bool:
+        """检查动作在当前情况下是否合理"""
+        move = action['action']
+        move_type = action.get('move_type', 'other')
+        
+        # 检查回复技能是否合理
+        if move_type == 'recovery':
+            # 只有在HP较低时才使用回复技能
+            return my_hp_frac < 0.7
+        
+        # 检查保护技能是否合理
+        if move_type == 'protection':
+            # 只有在有威胁时才使用保护技能
+            return self.opponent_has_high_threat_moves(battle) or my_hp_frac < 0.5
+        
+        # 检查强化技能是否合理
+        if move_type == 'setup':
+            # 只有在安全时才使用强化技能
+            return my_hp_frac > 0.6 and not self.opponent_has_high_threat_moves(battle)
+        
+        # 检查状态技能是否合理
+        if move_type == 'status':
+            # 检查对手是否已经有状态
+            opp_pokemon = getattr(battle, 'opponent_active_pokemon', None)
+            if opp_pokemon and opp_pokemon.status:
+                return False  # 对手已有状态，不需要再使用状态技能
+        
+        return True
 
     def evaluate_safe_switch(self, battle: AbstractBattle, action_utilities: List, switch_eval: Dict) -> Any:
         """评估主动换人"""
