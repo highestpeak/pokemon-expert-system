@@ -19,3 +19,10 @@ pokeenv/scripts/replays/*
 pokeenv/scripts/results/*
 
 showdown_agent/scripts/replays/*
+# 排除 showdown_agent/scripts/players 目录下除 ajhz632.py 外的所有文件
+showdown_agent/scripts/players/*
+!showdown_agent/scripts/players/ajhz632.py
+showdown_agent/scripts/results/*
+showdown_agent/scripts/logs/*
+showdown_agent/scripts/*.txt
+showdown_agent/scripts/*.log
