@@ -420,7 +420,7 @@ class CustomAgent(Player):
                 return self.choose_random_move(battle.available_moves)
         
         # **濒死判断**：是 AI 的第一个分支点（Switch vs. Move）
-        my_pokemon, _ = get_active_pokemon(battle)
+        my_pokemon, opp_pokemon = get_active_pokemon(battle)
         if not my_pokemon or my_pokemon.fainted:
             # 如果 active_pokemon 不存在或为 None，尝试切换
             if battle.available_switches:
@@ -432,20 +432,69 @@ class CustomAgent(Player):
         # **异常状态修正**：必须要有，否则 AI 会傻乎乎地让睡着的宝可梦硬抗
         self.adjust_for_status(my_pokemon)
         
+        # **简化决策逻辑**：优先攻击，减少复杂策略
+        if opp_pokemon and battle.available_moves:
+            # 1. 优先寻找能KO对手的招式
+            ko_moves = []
+            for move in battle.available_moves:
+                if move.base_power > 0:
+                    dmg_info = self.calculate_detailed_damage(move, opp_pokemon, battle)
+                    if dmg_info['ko_prob'] > 0.7:  # 高概率KO
+                        ko_moves.append((move, dmg_info['ko_prob']))
+            
+            if ko_moves:
+                # 选择KO概率最高的招式
+                best_ko_move = max(ko_moves, key=lambda x: x[1])[0]
+                return self.create_order(best_ko_move)
+            
+            # 2. 寻找高威力克制招式
+            best_move = None
+            best_score = -1
+            
+            for move in battle.available_moves:
+                 if move.base_power > 0:
+                     try:
+                         # 安全获取类型相克
+                         try:
+                             effectiveness = float(opp_pokemon.damage_multiplier(move))
+                         except:
+                             effectiveness = self.calculate_move_effectiveness(move, opp_pokemon)
+                         
+                         dmg_info = self.calculate_detailed_damage(move, opp_pokemon, battle)
+                         
+                         # 计算综合得分：威力 + 相克 + 伤害
+                         score = move.base_power * effectiveness + dmg_info['mean_damage'] * 0.1
+                         
+                         if score > best_score:
+                             best_score = score
+                             best_move = move
+                     except Exception as e:
+                         # 如果计算出错，跳过这个招式
+                         continue
+            
+            if best_move:
+                return self.create_order(best_move)
         
-        # 执行完整的策略pipeline（保持原有复杂逻辑）
-        best_action = self.execute_strategy_pipeline(battle)
-
-        if best_action:
-            # 记录行为用于学习
-            self.record_action(best_action, battle)
-            return best_action
-
+        # 3. 如果攻击不理想，考虑换人
+        if battle.available_switches and my_pokemon.current_hp / my_pokemon.max_hp < 0.5:
+            return self.choose_best_switch(battle.available_switches)
+        
+        # 4. 最后选择：随机攻击
+        if battle.available_moves:
+            return self.choose_random_move(battle)
+        
+        # 5. 如果没有任何选择，返回随机换人
         if battle.available_switches:
             return self.choose_best_switch(battle.available_switches)
         
-        # 如果策略pipeline返回None，使用随机选择作为后备
-        return self.choose_random_move(battle.available_moves)
+        # 6. 最后的最后：随机选择
+        if battle.available_moves:
+            return self.choose_random_move(battle)
+        elif battle.available_switches:
+            return self.choose_best_switch(battle.available_switches)
+        else:
+            # 如果没有任何选择，返回一个默认的pass
+            return self.create_order(battle.available_moves[0]) if battle.available_moves else None
     
     def adjust_for_status(self, pokemon):
         """异常状态修正"""
@@ -924,9 +973,25 @@ class CustomAgent(Player):
             P_my_KO = dmg_info['ko_prob']
             E_dmg = dmg_info['mean_damage']
             
-            # 攻击技能效用
-            utility += (tactical_weights['W_K'] * P_my_KO * 100.0 +  # KO概率价值
-                       tactical_weights['W_D'] * E_dmg * 0.1)        # 伤害价值
+            # 攻击技能效用 - 提高攻击权重
+            utility += (tactical_weights['W_K'] * P_my_KO * 150.0 +  # 提高KO概率价值
+                       tactical_weights['W_D'] * E_dmg * 0.2)        # 提高伤害价值
+            
+            # 添加类型相克奖励
+            try:
+                try:
+                    effectiveness = float(opp_pokemon.damage_multiplier(move))
+                except:
+                    effectiveness = self.calculate_move_effectiveness(move, opp_pokemon)
+                
+                if effectiveness >= 2.0:  # 2倍以上克制
+                    utility += 50.0
+                elif effectiveness >= 1.5:  # 1.5倍克制
+                    utility += 25.0
+                elif effectiveness < 0.5:  # 效果不好
+                    utility -= 30.0
+            except:
+                pass
         
         # 计算对手反击风险
         P_opp_incoming_KO = 0.0
@@ -978,7 +1043,7 @@ class CustomAgent(Player):
         return utility
 
     def calculate_detailed_damage(self, move: Move, target: Pokemon, battle: AbstractBattle) -> Dict:
-        """简化的伤害计算 - 基于基础公式但更稳定"""
+        """改进的伤害计算 - 更准确的伤害估算"""
         if move.base_power == 0:
             return {'ko_prob': 0.0, 'mean_damage': 0.0, 'min_damage': 0.0, 'max_damage': 0.0}
         
@@ -986,10 +1051,10 @@ class CustomAgent(Player):
         if not my_pokemon or not opp_pokemon:
             return {'ko_prob': 0.0, 'mean_damage': 0.0, 'min_damage': 0.0, 'max_damage': 0.0}
         
-        # 1. 基础伤害计算（简化但稳定）
-        base_damage = move.base_power
+        # 1. 基础伤害计算
+        base_power = move.base_power
         
-        # 2. STAB加成（修正：攻击方属性与招式属性匹配）
+        # 2. STAB加成
         stab_multiplier = 1.0
         if move.type and my_pokemon.types:
             for my_type in my_pokemon.types:
@@ -997,13 +1062,13 @@ class CustomAgent(Player):
                     stab_multiplier = 1.5
                     break
         
-        # 3. 类型相克（优先使用内置API，失败则用备用方案）
+        # 3. 类型相克
         try:
             type_effectiveness = float(target.damage_multiplier(move))
         except:
             type_effectiveness = self.calculate_move_effectiveness(move, target)
         
-        # 4. 天气修正（简化）
+        # 4. 天气修正
         weather_multiplier = 1.0
         if battle.weather:
             weather = str(battle.weather).lower()
@@ -1018,42 +1083,51 @@ class CustomAgent(Player):
             elif "rain" in weather and move_type_name == "fire":
                 weather_multiplier = 0.5
         
-        # 5. 状态修正（简化）
+        # 5. 状态修正
         status_multiplier = 1.0
         if my_pokemon.status == 'brn' and move.category == 'Physical':
             status_multiplier = 0.5
         
-        # 6. 计算最终伤害（使用更保守的公式）
-        total_damage = base_damage * stab_multiplier * type_effectiveness * weather_multiplier * status_multiplier
-        
-        # 7. 应用等级和种族值修正（简化版）
+        # 6. 种族值修正 - 更准确的攻击力计算
         level = 50
-        # 假设攻击方和防御方种族值相等，简化计算
-        stat_multiplier = 0.5  # 保守估计
-        total_damage *= stat_multiplier
+        if move.category == 'Physical':
+            attack_stat = my_pokemon.stats.get('atk', 100) if hasattr(my_pokemon, 'stats') and my_pokemon.stats else 100
+            defense_stat = target.stats.get('def', 100) if hasattr(target, 'stats') and target.stats else 100
+        else:  # Special
+            attack_stat = my_pokemon.stats.get('spa', 100) if hasattr(my_pokemon, 'stats') and my_pokemon.stats else 100
+            defense_stat = target.stats.get('spd', 100) if hasattr(target, 'stats') and target.stats else 100
+        
+        # 确保数值不为None
+        attack_stat = attack_stat if attack_stat is not None else 100
+        defense_stat = defense_stat if defense_stat is not None else 100
+        
+        # 使用更准确的种族值比例
+        stat_multiplier = (attack_stat / max(defense_stat, 1)) * 0.4  # 调整系数使其更接近实际伤害
+        
+        # 7. 计算最终伤害
+        total_damage = base_power * stab_multiplier * type_effectiveness * weather_multiplier * status_multiplier * stat_multiplier
         
         # 8. 随机因子（85%-100%）
         min_damage = total_damage * 0.85
         max_damage = total_damage * 1.0
         mean_damage = (min_damage + max_damage) / 2
         
-        # 9. 计算KO概率（保守估计）
+        # 9. 计算KO概率 - 更准确的估算
         target_hp_frac = target.current_hp / target.max_hp if target.max_hp > 0 else 1.0
         target_current_hp = target_hp_frac * target.max_hp
         
-        # 基于期望伤害计算KO概率（更保守）
         if mean_damage >= target_current_hp:
-            ko_prob = 0.8  # 即使伤害足够也不100%确定
+            ko_prob = 0.95  # 伤害足够时高概率KO
         elif min_damage >= target_current_hp:
-            ko_prob = 0.4  # 保守估计
+            ko_prob = 0.7   # 最小伤害足够时中等概率KO
         else:
-            # 基于伤害比例估算KO概率，但更保守
+            # 基于伤害比例估算KO概率
             damage_ratio = mean_damage / target_current_hp if target_current_hp > 0 else 0
-            ko_prob = max(0.0, min(damage_ratio * 0.5, 0.7))  # 更保守的估计
+            ko_prob = max(0.0, min(damage_ratio * 0.8, 0.9))  # 更积极的估计
         
         return {
             'ko_prob': min(ko_prob, 1.0),
-            'mean_damage': max(mean_damage, 0.0),  # 确保非负
+            'mean_damage': max(mean_damage, 0.0),
             'min_damage': max(min_damage, 0.0),
             'max_damage': max(max_damage, 0.0)
         }
@@ -1222,16 +1296,16 @@ class CustomAgent(Player):
         my_status = self.battle_state['my_status']
         opponent_threat = self.battle_state.get('opponent_threat', 'medium')
         
-        # 根据对手威胁度动态调整阈值
+        # 根据对手威胁度动态调整阈值 - 更激进的换人策略
         if opponent_threat == 'high':  # 高威胁对手（传说宝可梦等）
-            urgent_hp_threshold = 0.12
-            safe_hp_threshold = 0.75
+            urgent_hp_threshold = 0.20  # 提高换人阈值
+            safe_hp_threshold = 0.70    # 降低安全阈值
         elif opponent_threat == 'medium':  # 中等威胁（OU级别）
-            urgent_hp_threshold = 0.15
-            safe_hp_threshold = 0.80
+            urgent_hp_threshold = 0.25  # 提高换人阈值
+            safe_hp_threshold = 0.75    # 降低安全阈值
         else:  # 低威胁（NU/RU/UU级别）
-            urgent_hp_threshold = 0.18
-            safe_hp_threshold = 0.85
+            urgent_hp_threshold = 0.30  # 提高换人阈值
+            safe_hp_threshold = 0.80    # 降低安全阈值
         
         # 紧急换人判定（优先级最高）
         urgent_switch_needed = False
