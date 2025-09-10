@@ -978,34 +978,84 @@ class CustomAgent(Player):
         return utility
 
     def calculate_detailed_damage(self, move: Move, target: Pokemon, battle: AbstractBattle) -> Dict:
-        """详细伤害计算 - 包含KO概率和期望伤害"""
+        """简化的伤害计算 - 基于基础公式但更稳定"""
         if move.base_power == 0:
             return {'ko_prob': 0.0, 'mean_damage': 0.0, 'min_damage': 0.0, 'max_damage': 0.0}
         
-        # 基础伤害计算（简化版）
-        base_damage = move.base_power
-        effectiveness = self.calculate_move_effectiveness(move, target)
+        my_pokemon, opp_pokemon = get_active_pokemon(battle)
+        if not my_pokemon or not opp_pokemon:
+            return {'ko_prob': 0.0, 'mean_damage': 0.0, 'min_damage': 0.0, 'max_damage': 0.0}
         
-        # 考虑STAB加成
+        # 1. 基础伤害计算（简化但稳定）
+        base_damage = move.base_power
+        
+        # 2. STAB加成（修正：攻击方属性与招式属性匹配）
         stab_multiplier = 1.0
-        if move.type and target.types:
-            for target_type in target.types:
-                if move.type.name.upper() == target_type.name.upper():
+        if move.type and my_pokemon.types:
+            for my_type in my_pokemon.types:
+                if move.type.name.upper() == my_type.name.upper():
                     stab_multiplier = 1.5
                     break
         
-        # 考虑属性相克
-        total_damage = base_damage * effectiveness * stab_multiplier
+        # 3. 类型相克（优先使用内置API，失败则用备用方案）
+        try:
+            type_effectiveness = float(target.damage_multiplier(move))
+        except:
+            type_effectiveness = self.calculate_move_effectiveness(move, target)
         
-        # 计算KO概率（基于目标当前HP）
-        target_hp_frac = target.current_hp / target.max_hp
-        ko_prob = min(total_damage / (target.max_hp * 0.1), 1.0) if target_hp_frac > 0 else 1.0
+        # 4. 天气修正（简化）
+        weather_multiplier = 1.0
+        if battle.weather:
+            weather = str(battle.weather).lower()
+            move_type_name = move.type.name.lower() if move.type else ""
+            
+            if "sun" in weather and move_type_name == "fire":
+                weather_multiplier = 1.5
+            elif "rain" in weather and move_type_name == "water":
+                weather_multiplier = 1.5
+            elif "sun" in weather and move_type_name == "water":
+                weather_multiplier = 0.5
+            elif "rain" in weather and move_type_name == "fire":
+                weather_multiplier = 0.5
+        
+        # 5. 状态修正（简化）
+        status_multiplier = 1.0
+        if my_pokemon.status == 'brn' and move.category == 'Physical':
+            status_multiplier = 0.5
+        
+        # 6. 计算最终伤害（使用更保守的公式）
+        total_damage = base_damage * stab_multiplier * type_effectiveness * weather_multiplier * status_multiplier
+        
+        # 7. 应用等级和种族值修正（简化版）
+        level = 50
+        # 假设攻击方和防御方种族值相等，简化计算
+        stat_multiplier = 0.5  # 保守估计
+        total_damage *= stat_multiplier
+        
+        # 8. 随机因子（85%-100%）
+        min_damage = total_damage * 0.85
+        max_damage = total_damage * 1.0
+        mean_damage = (min_damage + max_damage) / 2
+        
+        # 9. 计算KO概率（保守估计）
+        target_hp_frac = target.current_hp / target.max_hp if target.max_hp > 0 else 1.0
+        target_current_hp = target_hp_frac * target.max_hp
+        
+        # 基于期望伤害计算KO概率（更保守）
+        if mean_damage >= target_current_hp:
+            ko_prob = 0.8  # 即使伤害足够也不100%确定
+        elif min_damage >= target_current_hp:
+            ko_prob = 0.4  # 保守估计
+        else:
+            # 基于伤害比例估算KO概率，但更保守
+            damage_ratio = mean_damage / target_current_hp if target_current_hp > 0 else 0
+            ko_prob = max(0.0, min(damage_ratio * 0.5, 0.7))  # 更保守的估计
         
         return {
-            'ko_prob': ko_prob,
-            'mean_damage': total_damage,
-            'min_damage': total_damage * 0.85,
-            'max_damage': total_damage * 1.15
+            'ko_prob': min(ko_prob, 1.0),
+            'mean_damage': max(mean_damage, 0.0),  # 确保非负
+            'min_damage': max(min_damage, 0.0),
+            'max_damage': max(max_damage, 0.0)
         }
 
     def estimate_setup_value(self, move: Move, battle: AbstractBattle, tactical_weights: Dict) -> float:
@@ -1555,16 +1605,64 @@ class CustomAgent(Player):
     # ============================== 辅助方法 ==============================
 
     def calculate_move_effectiveness(self, move: Move, target: Pokemon) -> float:
-        """计算招式对目标的相克效果"""
+        """简化的类型相克计算 - 优先使用内置API，失败则用备用方案"""
         if not move.type or not target.types:
+            return 1.0
+        
+        # 优先使用内置API获取更准确的类型相克
+        try:
+            effectiveness = float(target.damage_multiplier(move))
+            # 确保有效性在合理范围内
+            if 0.0 <= effectiveness <= 4.0:
+                return effectiveness
+            else:
+                # 如果API返回异常值，使用备用方案
+                raise ValueError("API returned invalid effectiveness")
+        except:
+            # 备用方案：使用你的类型相克表
+            effectiveness = 1.0
+            for target_type in target.types:
+                eff = get_type_effectiveness(move.type.name.upper(), target_type.name.upper())
+                effectiveness *= eff
+            return max(0.0, min(effectiveness, 4.0))  # 限制在合理范围内
+
+    def calculate_ko_probability(self, move: Move, target: Pokemon, battle: AbstractBattle) -> float:
+        """简化的KO概率计算"""
+        if move.base_power == 0:
+            return 0.0
+        
+        # 使用改进的伤害计算
+        dmg_info = self.calculate_detailed_damage(move, target, battle)
+        
+        # 基于对手当前HP计算KO概率
+        target_hp_frac = target.current_hp / target.max_hp if target.max_hp > 0 else 1.0
+        
+        if dmg_info['mean_damage'] >= target.current_hp:
+            return 1.0
+        elif dmg_info['min_damage'] >= target.current_hp:
             return 0.5
+        else:
+            # 基于伤害比例估算KO概率
+            damage_ratio = dmg_info['mean_damage'] / target.current_hp
+            return min(damage_ratio * 0.8, 0.9)  # 保守估计，避免过度乐观
+
+    def validate_damage_calculation(self, move: Move, target: Pokemon, battle: AbstractBattle) -> bool:
+        """验证伤害计算的合理性"""
+        dmg_info = self.calculate_detailed_damage(move, target, battle)
         
-        effectiveness = 1.0
-        for target_type in target.types:
-            eff = get_type_effectiveness(move.type.name.upper(), target_type.name.upper())
-            effectiveness *= eff
+        # 检查伤害是否在合理范围内
+        if dmg_info['mean_damage'] < 0:
+            return False
         
-        return effectiveness
+        # 检查KO概率是否合理
+        if dmg_info['ko_prob'] > 1.0 or dmg_info['ko_prob'] < 0:
+            return False
+        
+        # 检查伤害是否过高（可能是计算错误）
+        if dmg_info['mean_damage'] > target.max_hp * 2:
+            return False
+        
+        return True
     
     def classify_move(self, move: Move) -> str:
         """技能分类 - 根据招式特征分类"""
