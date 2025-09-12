@@ -28,3 +28,5 @@ showdown_agent/scripts/*.txt
 showdown_agent/scripts/*.log
 
 showdown_agent/results/*
+showdown_agent/scripts/evaluation_results/*
+showdown_agent/scripts/results
