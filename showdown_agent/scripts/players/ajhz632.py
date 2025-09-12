@@ -115,6 +115,7 @@ class CustomAgent(Player):
     def __init__(self, *args, **kwargs):
         super().__init__(team=team, *args, **kwargs)
         self.battle_logger = None
+        self.current_battle_id = None
         self.performance_stats = {
             'total_battles': 0,
             'wins': 0,
@@ -125,7 +126,7 @@ class CustomAgent(Player):
         self.setup_logging()
 
     def setup_logging(self):
-        """设置简化的日志系统"""
+        """设置详细的日志系统"""
         self.results_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'results')
         os.makedirs(self.results_dir, exist_ok=True)
         
@@ -145,9 +146,55 @@ class CustomAgent(Player):
         file_handler.setFormatter(formatter)
         self.main_logger.addHandler(file_handler)
 
+    def setup_battle_logging(self, battle: AbstractBattle):
+        """为每个对战设置独立的日志文件"""
+        if not self.current_battle_id or self.current_battle_id != battle.battle_tag:
+            self.current_battle_id = battle.battle_tag
+            # 初始文件名，稍后根据结果更新
+            self.battle_id = f"battle_{int(time.time())}_{battle.battle_tag}"
+            
+            # 创建对战专用日志器
+            self.battle_logger = logging.getLogger(f'battle_{self.battle_id}')
+            self.battle_logger.setLevel(logging.DEBUG)
+            
+            # 清除现有处理器
+            for handler in self.battle_logger.handlers[:]:
+                self.battle_logger.removeHandler(handler)
+            
+            # 创建对战日志文件
+            battle_log_file = os.path.join(self.results_dir, f'{self.battle_id}.log')
+            battle_file_handler = logging.FileHandler(battle_log_file, encoding='utf-8')
+            battle_file_handler.setLevel(logging.DEBUG)
+            
+            formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+            battle_file_handler.setFormatter(formatter)
+            self.battle_logger.addHandler(battle_file_handler)
+            
+            # 记录对战开始时间
+            self.battle_start_time = time.time()
+            
+            # 记录对战开始信息
+            self.battle_logger.info("=== 对战开始 ===")
+            self.battle_logger.info(f"对战ID: {self.battle_id}")
+            self.battle_logger.info(f"对战标签: {battle.battle_tag}")
+            self.battle_logger.info(f"对手: {battle.opponent_username}")
+            
+            # 记录我方首发宝可梦
+            my_pokemon, opp_pokemon = get_active_pokemon(battle)
+            if my_pokemon:
+                self.battle_logger.info(f"我方首发: {my_pokemon.species} (HP: {my_pokemon.current_hp:.2f})")
+            if opp_pokemon:
+                self.battle_logger.info(f"对手首发: {opp_pokemon.species} (HP: {opp_pokemon.current_hp:.2f})")
+                # 记录对手已知招式
+                known_moves = [move.id for move in opp_pokemon.moves.values() if move.current_pp > 0]
+                self.battle_logger.info(f"对手招式: {known_moves}")
+
     def choose_move(self, battle: AbstractBattle):
         """简化的主要决策函数"""
         start_time = time.time()
+        
+        # 设置对战日志
+        self.setup_battle_logging(battle)
         
         # 记录对战开始
         if battle.turn == 1:
@@ -167,6 +214,9 @@ class CustomAgent(Player):
         # 获取当前宝可梦
         my_pokemon, opp_pokemon = get_active_pokemon(battle)
         
+        # 记录回合开始信息
+        self.log_turn_start(battle, my_pokemon, opp_pokemon)
+        
         # 宝可梦濒死处理
         if not my_pokemon or my_pokemon.fainted:
             if battle.available_switches:
@@ -184,6 +234,9 @@ class CustomAgent(Player):
                 action = self.choose_best_switch(battle.available_switches)
                 self.log_decision(battle, action, time.time() - start_time)
                 return action
+        
+        # 记录伤害计算
+        self.log_damage_calculations(battle, my_pokemon, opp_pokemon)
         
         # 优先尝试高伤害攻击
         high_damage_action = self.choose_high_damage_move(battle)
@@ -376,7 +429,7 @@ class CustomAgent(Player):
 
     def classify_move(self, move: Move) -> str:
         """技能分类"""
-        move_name = str(move).lower()
+        move_name = move.id.lower()
         
         # 攻击技能
         if move.base_power > 0:
@@ -465,10 +518,50 @@ class CustomAgent(Player):
         
         return True
 
+    def log_turn_start(self, battle: AbstractBattle, my_pokemon: Optional[Pokemon], opp_pokemon: Optional[Pokemon]):
+        """记录回合开始信息"""
+        if self.battle_logger:
+            self.battle_logger.info(f"--- 第 {battle.turn} 回合 ---")
+            if my_pokemon:
+                status_str = f"状态:{my_pokemon.status}" if my_pokemon.status else "状态:None"
+                self.battle_logger.info(f"我方状态: {my_pokemon.species} HP:{my_pokemon.current_hp:.2f} {status_str}")
+            if opp_pokemon:
+                status_str = f"状态:{opp_pokemon.status}" if opp_pokemon.status else "状态:None"
+                self.battle_logger.info(f"对手状态: {opp_pokemon.species} HP:{opp_pokemon.current_hp:.2f} {status_str}")
+
+    def log_damage_calculations(self, battle: AbstractBattle, my_pokemon: Optional[Pokemon], opp_pokemon: Optional[Pokemon]):
+        """记录伤害计算过程"""
+        if not self.battle_logger or not my_pokemon or not opp_pokemon:
+            return
+        
+        for move in my_pokemon.moves.values():
+            if move.current_pp > 0 and move.base_power > 0:
+                damage_info = self.calculate_damage(move, opp_pokemon, my_pokemon)
+                self.battle_logger.debug(f"伤害计算: {move.id} (Move object) -> {opp_pokemon.species}")
+                self.battle_logger.debug(f"  基础威力: {move.base_power}")
+                self.battle_logger.debug(f"  期望伤害: {damage_info['mean_damage']:.1f}")
+                self.battle_logger.debug(f"  KO概率: {damage_info['ko_prob']:.2f}")
+
     def log_decision(self, battle: AbstractBattle, action, decision_time: float):
         """记录决策"""
         self.performance_stats['total_decision_time'] += decision_time
         self.performance_stats['total_turns'] += 1
+        
+        if self.battle_logger:
+            self.battle_logger.info(f"决策时间: {decision_time:.3f}秒")
+            
+            # 解析动作类型
+            action_str = str(action)
+            if "move" in action_str:
+                move_name = action_str.split("move ")[-1] if "move " in action_str else "unknown"
+                self.battle_logger.info(f"选择动作: /choose move {move_name}")
+            elif "switch" in action_str:
+                pokemon_name = action_str.split("switch ")[-1] if "switch " in action_str else "unknown"
+                self.battle_logger.info(f"选择动作: /choose switch {pokemon_name}")
+            else:
+                self.battle_logger.info(f"选择动作: {action_str}")
+            
+            self.battle_logger.info(f"策略信息: {{'reason': 'strategy_pipeline'}}")
         
         if battle.turn % 10 == 0:  # 每10回合记录一次
             self.main_logger.info(f"回合 {battle.turn}: {action} (决策时间: {decision_time:.3f}s)")
@@ -483,6 +576,16 @@ class CustomAgent(Player):
         else:
             self.performance_stats['losses'] += 1
         
+        # 记录对战结束信息
+        if self.battle_logger:
+            self.battle_logger.info("=== 对战结束 ===")
+            self.battle_logger.info(f"结果: {'胜利' if won else '失败'}")
+            self.battle_logger.info(f"对战时长: {time.time() - getattr(self, 'battle_start_time', time.time()):.2f}秒")
+            self.battle_logger.info(f"总回合数: {battle.turn}")
+        
+        # 根据结果重命名日志文件
+        self.rename_battle_log_file(battle)
+        
         # 记录结果
         win_rate = self.performance_stats['wins'] / self.performance_stats['total_battles']
         avg_decision_time = self.performance_stats['total_decision_time'] / self.performance_stats['total_turns'] if self.performance_stats['total_turns'] > 0 else 0
@@ -493,6 +596,41 @@ class CustomAgent(Player):
         self.save_performance_stats()
         
         super()._battle_finished_callback(battle)
+
+    def rename_battle_log_file(self, battle: AbstractBattle):
+        """根据对战结果重命名日志文件"""
+        if not hasattr(self, 'battle_id') or not self.battle_id:
+            return
+        
+        old_file_path = os.path.join(self.results_dir, f'{self.battle_id}.log')
+        
+        if not os.path.exists(old_file_path):
+            return
+        
+        # 确定结果前缀
+        if battle.won is True:
+            result_prefix = "battle_win"
+        elif battle.won is False:
+            result_prefix = "battle_loss"
+        else:
+            result_prefix = "battle_tie"  # 平局或未知结果
+        
+        # 提取原始文件名中的时间戳和标签部分
+        parts = self.battle_id.split('_', 1)  # 分割出 "battle" 和剩余部分
+        if len(parts) > 1:
+            suffix = parts[1]  # 时间戳和标签部分
+        else:
+            suffix = self.battle_id
+        
+        new_filename = f"{result_prefix}_{suffix}.log"
+        new_file_path = os.path.join(self.results_dir, new_filename)
+        
+        try:
+            # 重命名文件
+            os.rename(old_file_path, new_file_path)
+            self.main_logger.info(f"日志文件已重命名: {os.path.basename(old_file_path)} -> {os.path.basename(new_file_path)}")
+        except OSError as e:
+            self.main_logger.error(f"重命名日志文件失败: {e}")
 
     def save_performance_stats(self):
         """保存性能统计"""
